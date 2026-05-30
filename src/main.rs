@@ -6,11 +6,17 @@
 // fullscreen surface. Any keypress / mouse movement / click exits, so it
 // dismisses instantly. The wl-screensaver daemon launches it on idle.
 //
-// Configuration: ~/.config/wlmatrix/config.toml (flat key = value, TOML-compatible),
-// overridable by CLI flags. See HELP and load_config().
+// Configuration: wlmatrix/config.toml under the OS config dir (flat key = value,
+// TOML-compatible), overridable by CLI flags. See HELP and default_config_path().
+//
+// Portability: the renderer (winit + softbuffer + ab_glyph) is cross-platform —
+// it builds and runs on Linux (Wayland/X11), macOS and Windows. Fonts are found
+// via the OS font database (fontdb) and the config dir via `dirs`, so there are
+// no hardcoded paths. The idle-launch *screensaver* glue (dist/) is Linux-only
+// for now; on macOS/Windows wlmatrix runs as a normal fullscreen app.
 
 use std::num::NonZeroU32;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -20,18 +26,20 @@ use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Fullscreen, Window, WindowId};
 
-const FONT_CANDIDATES: &[&str] = &[
-    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
-    "/usr/share/fonts/truetype/noto/NotoMono-Regular.ttf",
+// Monospace font *family names* we prefer, in order. We query these against the
+// OS font database (fontdb) rather than hardcoding file paths, so this works on
+// Linux, macOS and Windows. The list spans all three: DejaVu/Liberation/Noto
+// (Linux), Menlo/SF Mono/Monaco (macOS), Consolas/Cascadia/Courier New (Windows).
+const MONO_FAMILIES: &[&str] = &[
+    "DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono", "Ubuntu Mono",
+    "Menlo", "SF Mono", "Monaco", "Consolas", "Cascadia Mono", "Courier New",
 ];
-// Fallback fonts for non-latin charsets (e.g. katakana). .ttc collections are
-// loaded at face 0.
-const CJK_CANDIDATES: &[&str] = &[
-    "/usr/share/fonts/opentype/noto/NotoSansMonoCJKjp-Regular.otf",
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+// CJK-capable families for non-latin charsets (e.g. katakana), again by name and
+// spanning all three platforms.
+const CJK_FAMILIES: &[&str] = &[
+    "Noto Sans Mono CJK JP", "Noto Sans CJK JP", "Source Han Sans",
+    "Hiragino Sans", "Hiragino Kaku Gothic ProN", // macOS
+    "Yu Gothic", "Meiryo", "MS Gothic", "Microsoft YaHei", // Windows
 ];
 // half-width katakana — single-width, fits the rain grid (full-width would overlap)
 const KATAKANA: std::ops::RangeInclusive<char> = '\u{FF66}'..='\u{FF9D}';
@@ -86,16 +94,11 @@ fn parse_bool(s: &str) -> bool {
     matches!(s.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on")
 }
 
-/// `~/.config/wlmatrix/config.toml` (respects $XDG_CONFIG_HOME).
+/// The per-OS config file: `wlmatrix/config.toml` under the platform config dir
+/// — `~/.config` (Linux, honoring `$XDG_CONFIG_HOME`), `~/Library/Application
+/// Support` (macOS), or `%APPDATA%` (Windows). Resolved by the `dirs` crate.
 fn default_config_path() -> Option<PathBuf> {
-    if let Ok(x) = std::env::var("XDG_CONFIG_HOME") {
-        if !x.is_empty() {
-            return Some(Path::new(&x).join("wlmatrix/config.toml"));
-        }
-    }
-    std::env::var("HOME")
-        .ok()
-        .map(|h| Path::new(&h).join(".config/wlmatrix/config.toml"))
+    dirs::config_dir().map(|d| d.join("wlmatrix/config.toml"))
 }
 
 /// Parse a flat `key = value` file (a subset of TOML: scalars + quoted strings,
@@ -383,32 +386,75 @@ fn build_glyphs(font: &FontVec, charset: &str, font_px: f32) -> (Vec<GlyphBmp>, 
     (glyphs, cell_w, cell_h)
 }
 
-/// Load a font that can render `charset`, trying the configured path, then the
-/// monospace candidates, then the CJK candidates (or CJK first for non-latin
-/// charsets). `.ttc` collections load face 0. Returns (font, covers_charset).
+/// Load a font that can render `charset`. Resolution order: an explicit
+/// `font_path`, then preferred families queried against the OS font database
+/// (CJK families first for non-latin charsets), then the OS's generic monospace,
+/// then any monospaced face that covers the charset. Cross-platform via fontdb —
+/// no hardcoded file paths. Returns (font, covers_charset).
 fn load_font(charset: &str, font_path: &Option<String>) -> (FontVec, bool) {
     let needs_cjk = charset.chars().any(|c| c as u32 > 0x2FF);
-    let mut paths: Vec<String> = Vec::new();
-    if let Some(p) = font_path {
-        paths.push(p.clone());
-    }
-    let (a, b): (&[&str], &[&str]) = if needs_cjk {
-        (CJK_CANDIDATES, FONT_CANDIDATES)
-    } else {
-        (FONT_CANDIDATES, CJK_CANDIDATES)
-    };
-    paths.extend(a.iter().chain(b).map(|s| s.to_string()));
-
     let sample = charset.chars().next().unwrap_or('M');
+
+    // 1) explicit override path (e.g. config `font = "..."`).
+    if let Some(p) = font_path {
+        if let Ok(data) = std::fs::read(p) {
+            if let Ok(font) = FontVec::try_from_vec_and_index(data, 0) {
+                let covered = font.glyph_id(sample).0 != 0;
+                return (font, covered);
+            }
+        }
+        eprintln!("wlmatrix: font '{p}' not usable; falling back to a system font");
+    }
+
+    // 2) ask the OS for fonts (works on Linux, macOS and Windows).
+    let mut db = fontdb::Database::new();
+    db.load_system_fonts();
+    // ab_glyph FontVec from a fontdb face id (handles .ttc face indices).
+    let load = |db: &fontdb::Database, id: fontdb::ID| -> Option<FontVec> {
+        db.with_face_data(id, |data, index| FontVec::try_from_vec_and_index(data.to_vec(), index).ok())
+            .flatten()
+    };
+    let covers = |f: &FontVec| f.glyph_id(sample).0 != 0;
+
+    // Preferred families by name (CJK first when the charset needs it).
+    let mut families: Vec<&str> = Vec::new();
+    if needs_cjk {
+        families.extend(CJK_FAMILIES);
+    }
+    families.extend(MONO_FAMILIES);
+
     let mut fallback: Option<FontVec> = None;
-    for p in &paths {
-        let Ok(data) = std::fs::read(p) else { continue };
-        let Ok(font) = FontVec::try_from_vec_and_index(data, 0) else { continue };
-        if font.glyph_id(sample).0 != 0 {
-            return (font, true); // this font covers the charset
+    for name in families {
+        let q = fontdb::Query { families: &[fontdb::Family::Name(name)], ..Default::default() };
+        if let Some(font) = db.query(&q).and_then(|id| load(&db, id)) {
+            if covers(&font) {
+                return (font, true);
+            }
+            fallback.get_or_insert(font);
+        }
+    }
+    // 3) the OS's generic monospace family.
+    let q = fontdb::Query { families: &[fontdb::Family::Monospace], ..Default::default() };
+    if let Some(font) = db.query(&q).and_then(|id| load(&db, id)) {
+        if covers(&font) {
+            return (font, true);
         }
         fallback.get_or_insert(font);
     }
+    // 4) last resort: any monospaced face that actually covers the sample
+    //    (catches CJK on systems whose family names we didn't anticipate).
+    for face in db.faces() {
+        if !face.monospaced {
+            continue;
+        }
+        if let Some(font) = load(&db, face.id) {
+            if covers(&font) {
+                return (font, true);
+            }
+            fallback.get_or_insert(font);
+        }
+    }
+
     (fallback.expect("no usable font found on this system"), false)
 }
 
@@ -1107,9 +1153,10 @@ OPTIONS:
         --shot <FILE>       Render one frame to a PNG and exit
         --gif  <FILE>       Render an animated looping GIF and exit
 
-Settings load from ~/.config/wlmatrix/config.toml (or $XDG_CONFIG_HOME);
-CLI flags override the file. With no options it runs fullscreen and exits on
-any input, normally launched on idle by the wl-screensaver daemon.
+Settings load from wlmatrix/config.toml in your OS config dir (~/.config on
+Linux, ~/Library/Application Support on macOS, %APPDATA% on Windows); CLI flags
+override the file. With no options it runs fullscreen and exits on any input
+(on Linux, normally launched on idle by the wl-screensaver daemon).
 ";
 
 fn die(msg: &str) -> ! {

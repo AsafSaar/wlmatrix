@@ -11,7 +11,7 @@ render fullscreen. Going native + CPU-only was the only reliable path. See
 
 ![status](https://img.shields.io/badge/status-working-brightgreen)
 ![license](https://img.shields.io/badge/license-MIT-blue)
-![platform](https://img.shields.io/badge/platform-Wayland-informational)
+![platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-informational)
 
 ![wlmatrix demo](docs/demo.gif)
 
@@ -123,12 +123,37 @@ Three pieces work together:
 
 ## Requirements
 
-- A Wayland session (GNOME tested). `echo $XDG_SESSION_TYPE` should say `wayland`.
 - Rust toolchain (`cargo`).
-- A monospace TTF. The app searches, in order:
-  `DejaVuSansMono`, `LiberationMono-Regular`, `NotoSansMono-Regular`,
-  `NotoMono-Regular` under `/usr/share/fonts`.
-- For the daemon/service: `gdbus` (ships with glib) and a systemd user session.
+- A monospace font installed system-wide — found automatically via the OS font
+  database (preferring DejaVu/Liberation/Noto on Linux, Menlo/SF Mono on macOS,
+  Consolas/Cascadia on Windows). Override with `font = "/path"` if you like.
+- **Linux:** a Wayland or X11 session (`echo $XDG_SESSION_TYPE`). The idle
+  daemon/service additionally needs `gdbus` (ships with glib) and a systemd
+  user session.
+- **macOS / Windows:** nothing extra — see [Platforms](#platforms) below.
+
+---
+
+## Platforms
+
+The **renderer is cross-platform**. winit, softbuffer and ab_glyph all support
+Linux (Wayland/X11), macOS and Windows, and wlmatrix deliberately uses **no GPU
+/ OpenGL**, so it builds and runs on all three. CI builds a binary for each
+([`.github/workflows/build.yml`](.github/workflows/build.yml)); tagged releases
+attach `wlmatrix-x86_64-linux`, `wlmatrix-aarch64-macos`, and
+`wlmatrix-x86_64-windows.exe`.
+
+| | Renders the rain | Exits on input | Auto-launch on idle |
+|---|---|---|---|
+| **Linux** (Wayland/X11) | ✅ | ✅ | ✅ `wl-screensaver` daemon + systemd |
+| **macOS** | ✅ | ✅ | ⏳ not yet — run it as an app |
+| **Windows** | ✅ | ✅ | ⏳ not yet — run it as an app |
+
+So on macOS/Windows today wlmatrix runs as a **fullscreen app that exits on any
+input** (great as a manual "blank the screen" toy or via your own hotkey/idle
+launcher). What's *not* done yet is first-class OS screensaver integration —
+a Windows `.scr` (`/s`/`/c`/`/p` handling) and a macOS `.saver` bundle or
+`launchd` idle agent. Contributions welcome.
 
 ---
 

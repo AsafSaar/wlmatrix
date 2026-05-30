@@ -1,8 +1,8 @@
 [package]
 name = "wlmatrix"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
-description = "Native Wayland Matrix-rain screensaver, CPU-rendered via wl_shm (no GPU)"
+description = "CPU-rendered Matrix-rain screensaver (no GPU); native on Linux Wayland/X11, also builds on macOS and Windows"
 authors = ["Asaf Saar"]
 license = "MIT"
 repository = "https://github.com/AsafSaar/wlmatrix"
@@ -16,6 +16,8 @@ softbuffer = "0.4"
 ab_glyph = "0.2"
 png = "0.17"   # only used by `--shot` (render a frame to PNG)
 gif = "0.13"   # only used by `--gif` (render an animated GIF)
+fontdb = "0.18"  # cross-platform system-font discovery (no hardcoded paths)
+dirs = "5"       # per-OS config directory
 
 [profile.release]
 opt-level = 3
