@@ -81,7 +81,7 @@ struct App {
 }
 
 impl App {
-    fn new() -> App {
+    fn new(font_px: f32) -> App {
         // load font
         let path = FONT_CANDIDATES
             .iter()
@@ -90,7 +90,7 @@ impl App {
             .unwrap_or(FONT_CANDIDATES[0]);
         let data = std::fs::read(path).expect("cannot read font file");
         let font = FontVec::try_from_vec(data).expect("invalid font");
-        let scaled = font.as_scaled(FONT_PX);
+        let scaled = font.as_scaled(font_px);
         let ascent = scaled.ascent();
         let advance = scaled.h_advance(font.glyph_id('M'));
         let cell_w = advance.ceil().max(1.0) as usize;
@@ -98,7 +98,7 @@ impl App {
 
         let mut glyphs = Vec::new();
         for ch in CHARSET.chars() {
-            let glyph: Glyph = font.glyph_id(ch).with_scale_and_position(FONT_PX, Point { x: 0.0, y: 0.0 });
+            let glyph: Glyph = font.glyph_id(ch).with_scale_and_position(font_px, Point { x: 0.0, y: 0.0 });
             if let Some(outline) = font.outline_glyph(glyph) {
                 let b = outline.px_bounds();
                 let gw = b.width().ceil() as usize;
@@ -376,6 +376,7 @@ OPTIONS:
     -h, --help           Show this help and exit
     -V, --version        Show version and exit
         --shot <FILE>    Render one frame to a PNG and exit (for previews/README)
+        --gif  <FILE>    Render an animated looping GIF and exit (for the README)
 
 With no options it runs fullscreen and exits on any key or mouse input. It is
 normally launched on idle by the companion wl-screensaver daemon.
@@ -384,7 +385,7 @@ normally launched on idle by the companion wl-screensaver daemon.
 /// Render one steady-state frame (16:9) straight to a PNG — no window needed.
 fn render_shot(path: &str) {
     let (w, h) = (1600usize, 900usize);
-    let mut app = App::new();
+    let mut app = App::new(FONT_PX);
     app.rebuild_grid(w, h);
     for _ in 0..220 {
         app.step(0.05); // let the rain reach a full-screen steady state
@@ -409,6 +410,63 @@ fn render_shot(path: &str) {
     println!("wrote {path} ({w}x{h})");
 }
 
+/// Render an animated, looping GIF of the rain — no window/screen-capture needed.
+/// Uses a denser (smaller) font so the rain stays dense at GIF resolution.
+fn render_gif(path: &str) {
+    use std::borrow::Cow;
+    let (w, h) = (800usize, 450usize);
+    let frames = 60;
+    let delay = 5; // centiseconds per frame → 50ms → 20 fps
+    let green_levels = 32usize;
+
+    let mut app = App::new(15.0);
+    app.rebuild_grid(w, h);
+    for _ in 0..120 {
+        app.step(0.05); // warm up to a full-screen steady state
+    }
+
+    // 64-color global palette: 0=black, 1=white head, 2..=33 green ramp, rest black.
+    let mut palette = vec![0u8; 64 * 3];
+    palette[3..6].copy_from_slice(&[200, 255, 200]); // head
+    for i in 0..green_levels {
+        let g = (((i + 1) * 255) / green_levels) as u8;
+        let b = (g as u32 * 40 / 255) as u8;
+        let p = (2 + i) * 3;
+        palette[p..p + 3].copy_from_slice(&[0, g, b]);
+    }
+
+    let file = std::fs::File::create(path).expect("create gif file");
+    let mut encoder =
+        gif::Encoder::new(std::io::BufWriter::new(file), w as u16, h as u16, &palette)
+            .expect("gif encoder");
+    encoder.set_repeat(gif::Repeat::Infinite).expect("gif repeat");
+
+    let mut buf = vec![0u32; w * h];
+    for _ in 0..frames {
+        app.step(0.05);
+        paint_frame(&mut buf, w, h, &app.glyphs, &app.columns, app.cell_w, app.cell_h, app.rows);
+        let mut indexed = vec![0u8; w * h];
+        for (i, px) in buf.iter().enumerate() {
+            let r = (px >> 16) & 0xFF;
+            let g = (px >> 8) & 0xFF;
+            indexed[i] = if r > 120 {
+                1 // white head
+            } else if g == 0 {
+                0 // black
+            } else {
+                2 + ((g as usize * green_levels / 256).min(green_levels - 1)) as u8
+            };
+        }
+        let mut frame = gif::Frame::default();
+        frame.width = w as u16;
+        frame.height = h as u16;
+        frame.buffer = Cow::Owned(indexed);
+        frame.delay = delay;
+        encoder.write_frame(&frame).expect("gif frame");
+    }
+    println!("wrote {path} ({w}x{h}, {frames} frames)");
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -429,6 +487,14 @@ fn main() {
                 render_shot(&path);
                 return;
             }
+            "--gif" => {
+                let path = args.next().unwrap_or_else(|| {
+                    eprintln!("--gif requires a file path");
+                    std::process::exit(2);
+                });
+                render_gif(&path);
+                return;
+            }
             other => {
                 eprintln!("wlmatrix: unknown argument '{other}'. Try --help.");
                 std::process::exit(2);
@@ -438,6 +504,6 @@ fn main() {
 
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App::new();
+    let mut app = App::new(FONT_PX);
     let _ = event_loop.run_app(&mut app);
 }

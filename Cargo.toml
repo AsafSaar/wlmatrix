@@ -15,6 +15,7 @@ winit = "0.30"
 softbuffer = "0.4"
 ab_glyph = "0.2"
 png = "0.17"   # only used by `--shot` (render a frame to PNG)
+gif = "0.13"   # only used by `--gif` (render an animated GIF)
 
 [profile.release]
 opt-level = 3
