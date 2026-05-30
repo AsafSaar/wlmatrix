@@ -155,6 +155,36 @@ launcher). What's *not* done yet is first-class OS screensaver integration —
 a Windows `.scr` (`/s`/`/c`/`/p` handling) and a macOS `.saver` bundle or
 `launchd` idle agent. Contributions welcome.
 
+### Running the downloaded binary on macOS
+
+The release binaries are **not yet code-signed or notarized**, so on first run
+macOS Gatekeeper blocks it with *"…cannot be opened because it is from an
+unidentified developer"* or offers to **move it to the Trash**. This is expected
+for any unsigned binary — not a problem with the file. Clear the quarantine flag
+and mark it executable:
+
+```bash
+# after downloading wlmatrix-aarch64-macos (e.g. to ~/Downloads):
+cd ~/Downloads
+xattr -d com.apple.quarantine wlmatrix-aarch64-macos   # remove the download quarantine
+chmod +x wlmatrix-aarch64-macos
+./wlmatrix-aarch64-macos                                # runs fullscreen; press any key to exit
+```
+
+If you'd rather not use the terminal: try to open it once (let it be blocked),
+then go to **System Settings → Privacy & Security**, scroll to the Security
+section, and click **"Open Anyway"** next to wlmatrix.
+
+> The download is an Apple-Silicon (`aarch64`) binary. On an Intel Mac, build
+> from source instead (`cargo build --release`) — see [Build & install](#build--install).
+>
+> The proper fix is signing + notarization with an Apple Developer ID; until
+> that's set up, the quarantine step above is the workaround. Building from
+> source never gets quarantined.
+
+> **Windows** may likewise show a SmartScreen warning ("Windows protected your
+> PC") for the unsigned `.exe` — click **More info → Run anyway**.
+
 ---
 
 ## Build & install
