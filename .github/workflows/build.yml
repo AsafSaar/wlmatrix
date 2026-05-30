@@ -55,7 +55,7 @@ jobs:
         shell: bash
         run: |
           VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
-          dist/macos/make-app.sh target/release/wlmatrix "$VERSION" dist-bin
+          bash dist/macos/make-app.sh target/release/wlmatrix "$VERSION" dist-bin
           ( cd dist-bin && ditto -c -k --keepParent wlmatrix.app wlmatrix-macos.app.zip && rm -rf wlmatrix.app )
 
       - uses: actions/upload-artifact@v4
