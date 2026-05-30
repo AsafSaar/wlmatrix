@@ -1,0 +1,19 @@
+[package]
+name = "wlmatrix"
+version = "0.1.0"
+edition = "2021"
+description = "Native Wayland Matrix-rain screensaver, CPU-rendered via wl_shm (no GPU)"
+authors = ["Asaf Saar"]
+license = "MIT"
+repository = "https://github.com/AsafSaar/wlmatrix"
+readme = "README.md"
+keywords = ["screensaver", "wayland", "matrix", "gnome", "softbuffer"]
+categories = ["graphics", "gui"]
+
+[dependencies]
+winit = "0.30"
+softbuffer = "0.4"
+ab_glyph = "0.2"
+
+[profile.release]
+opt-level = 3

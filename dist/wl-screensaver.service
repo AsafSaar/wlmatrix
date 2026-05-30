@@ -1,0 +1,17 @@
+[Unit]
+Description=Wayland-native screensaver (wlmatrix via Mutter idle detection)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+Environment=WAYLAND_DISPLAY=wayland-0
+# Idle before the screensaver starts, in milliseconds (300000 = 5 min).
+Environment=SAVER_IDLE_MS=300000
+# Override the renderer if you like, e.g.:
+# Environment=SAVER_CMD=%h/.local/bin/wlmatrix
+ExecStart=%h/.local/bin/wl-screensaver
+Restart=on-failure
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# wl-screensaver — idle daemon for a Wayland screensaver on GNOME.
+#
+# GNOME/Wayland has no built-in animated screensaver, but Mutter still reports
+# idle time over D-Bus. This daemon polls that idle time and, once you've been
+# idle past the threshold, launches a fullscreen Wayland command (SAVER_CMD,
+# default: wlmatrix). The first input resets Mutter's idle counter, so
+# we detect that and kill the screensaver.
+#
+# Configure via environment (see wl-screensaver.service):
+#   SAVER_CMD     command to run fullscreen   (default: ~/.local/bin/wlmatrix)
+#   SAVER_IDLE_MS idle ms before it kicks in  (default: 300000 = 5 min)
+set -u
+
+IDLE_MS="${SAVER_IDLE_MS:-300000}"
+POLL=1                       # seconds between idle checks (also the dismiss lag)
+
+SAVER_CMD_DEFAULT="$HOME/.local/bin/wlmatrix"
+read -r -a SAVER_CMD <<< "${SAVER_CMD:-$SAVER_CMD_DEFAULT}"
+
+SAVER_PID=""
+
+idletime() {
+  # milliseconds since last input device activity, per Mutter.
+  # NB: parse with sed, not `grep -oE '[0-9]+'` — that grabs the 64 in "uint64".
+  gdbus call --session \
+    --dest org.gnome.Mutter.IdleMonitor \
+    --object-path /org/gnome/Mutter/IdleMonitor/Core \
+    --method org.gnome.Mutter.IdleMonitor.GetIdletime \
+    2>/dev/null | sed -E 's/.*uint64 ([0-9]+).*/\1/'
+}
+
+start_saver() {
+  if ! command -v "${SAVER_CMD[0]}" >/dev/null 2>&1; then
+    echo "wl-screensaver: '${SAVER_CMD[0]}' not found on PATH" >&2
+    return
+  fi
+  "${SAVER_CMD[@]}" >/dev/null 2>&1 &
+  SAVER_PID=$!
+}
+
+stop_saver() {
+  [ -n "$SAVER_PID" ] && kill "$SAVER_PID" 2>/dev/null
+  SAVER_PID=""
+}
+
+trap 'stop_saver; exit 0' TERM INT
+
+while true; do
+  idle=$(idletime); idle=${idle:-0}
+  if [ -z "$SAVER_PID" ] || ! kill -0 "$SAVER_PID" 2>/dev/null; then
+    SAVER_PID=""                       # not running (or exited)
+    [ "$idle" -ge "$IDLE_MS" ] && start_saver
+  else
+    [ "$idle" -lt "$IDLE_MS" ] && stop_saver   # user is back → dismiss
+  fi
+  sleep "$POLL"
+done
