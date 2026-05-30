@@ -7,12 +7,18 @@
 # default: wlmatrix). The first input resets Mutter's idle counter, so
 # we detect that and kill the screensaver.
 #
-# Configure via environment (see wl-screensaver.service):
-#   SAVER_CMD     command to run fullscreen   (default: ~/.local/bin/wlmatrix)
-#   SAVER_IDLE_MS idle ms before it kicks in  (default: 300000 = 5 min)
+# Idle time comes from (in order): the SAVER_IDLE_MS env var, then `idle_ms` in
+# ~/.config/wlmatrix/config.toml, then a 5-minute default. SAVER_CMD overrides
+# the fullscreen command to run (default: ~/.local/bin/wlmatrix).
 set -u
 
-IDLE_MS="${SAVER_IDLE_MS:-300000}"
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/wlmatrix/config.toml"
+config_idle() {
+  [ -f "$CONFIG" ] || return
+  grep -E '^[[:space:]]*idle_ms' "$CONFIG" | head -1 | grep -oE '[0-9]+' | head -1
+}
+IDLE_MS="${SAVER_IDLE_MS:-$(config_idle)}"
+IDLE_MS="${IDLE_MS:-300000}"
 POLL=1                       # seconds between idle checks (also the dismiss lag)
 
 SAVER_CMD_DEFAULT="$HOME/.local/bin/wlmatrix"

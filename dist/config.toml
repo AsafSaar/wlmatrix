@@ -1,0 +1,28 @@
+# wlmatrix configuration  —  ~/.config/wlmatrix/config.toml
+# Flat "key = value" (a subset of TOML). CLI flags override anything here.
+
+# Idle time before the screensaver starts, in milliseconds (read by the
+# wl-screensaver daemon). 300000 = 5 minutes, 60000 = 1 minute.
+idle_ms = 300000
+
+# Animation frame rate.
+fps = 30
+
+# Glyph size in pixels (bigger = larger characters and sparser rain).
+font_size = 26
+
+# Fall-speed range, in rows per second.
+speed_min = 6
+speed_max = 24
+
+# Color theme: green | amber | cyan | red | purple | white | "#RRGGBB"
+color = "green"
+
+# Characters that rain:
+#   preset:  ascii | alnum | binary | digits | katakana
+#            (katakana needs a CJK-capable font — see `font` below)
+#   literal: any string, e.g. "01" or "アイウエオカキ"
+charset = "ascii"
+
+# Optional: force a specific font file. If unset, a system monospace is found.
+# font = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"

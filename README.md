@@ -128,44 +128,51 @@ Check the service: `systemctl --user status wl-screensaver.service`
 
 ---
 
-## Usage & configuration
+## Configuration
 
-### Idle timeout
+All settings live in one file — **`~/.config/wlmatrix/config.toml`** (respects
+`$XDG_CONFIG_HOME`). Edit it and the change takes effect the next time the
+screensaver runs; no rebuild, no restart (the idle daemon re-reads `idle_ms`
+each run too). `install.sh` drops a commented default if you don't have one.
 
-Set by `SAVER_IDLE_MS` (milliseconds) in the service file. Default `300000` = 5 min.
-
-```ini
-Environment=SAVER_IDLE_MS=300000   # 60000=1m, 180000=3m, 600000=10m
+```toml
+idle_ms    = 300000   # idle before it starts, in ms (300000 = 5 min)
+fps        = 30        # animation frame rate
+font_size  = 26        # glyph size; bigger = sparser rain
+speed_min  = 6         # fall-speed range, rows/sec
+speed_max  = 24
+color      = "green"   # green|amber|cyan|red|purple|white|"#RRGGBB"
+charset    = "ascii"   # ascii|alnum|binary|digits|katakana|"<literal>"
+# font     = "/path/to/Mono.ttf"   # optional; else a system mono is found
 ```
 
-After editing: `systemctl --user daemon-reload && systemctl --user restart wl-screensaver`.
+| Key | Default | Notes |
+|-----|---------|-------|
+| `idle_ms` | `300000` | read by the daemon; ms before the saver starts |
+| `fps` | `30` | 1–240 |
+| `font_size` | `26` | pixels; controls rain density |
+| `speed_min` / `speed_max` | `6` / `24` | rows per second |
+| `color` | `green` | preset name or `#RRGGBB` |
+| `charset` | `ascii` | preset or a literal string (`katakana` needs a CJK font) |
+| `font` | *(auto)* | force a specific `.ttf` |
+
+### CLI overrides
+
+Any flag overrides the file — handy for trying things or baking a variant into
+the service’s `SAVER_CMD`:
+
+```bash
+wlmatrix --color amber --speed 4-20 --fps 60
+wlmatrix --config /path/to/other.toml
+```
+
+Run `wlmatrix --help` for the full list.
 
 ### Quick test without waiting
 
 ```bash
 SAVER_IDLE_MS=5000 ~/.local/bin/wl-screensaver   # 5-second idle; Ctrl-C to stop
 ```
-
-### Use a different renderer
-
-The daemon runs whatever `SAVER_CMD` points to (default: this app). Any
-fullscreen Wayland command works:
-
-```ini
-Environment=SAVER_CMD=/home/asaf/.local/bin/wlmatrix
-```
-
-### Tuning the look
-
-Edit `src/main.rs`, then rebuild (`cargo build --release …`):
-
-| Constant / code | Effect |
-|-----------------|--------|
-| `FPS` (30) | animation frame rate |
-| `FONT_PX` (26.0) | character size → rain density |
-| `6.0 + … * 18.0` in `step()` | fall-speed range (rows/sec) |
-| colors in `render()` | head is white `(220,255,220)`, trail green |
-| `CHARSET` | which glyphs rain |
 
 ---
 
@@ -178,7 +185,8 @@ wlmatrix/
 ├── install.sh               # build + install + enable everything
 ├── dist/
 │   ├── wl-screensaver         # idle daemon (bash) → ~/.local/bin/
-│   └── wl-screensaver.service # systemd user unit → ~/.config/systemd/user/
+│   ├── wl-screensaver.service # systemd user unit → ~/.config/systemd/user/
+│   └── config.toml            # default config → ~/.config/wlmatrix/
 ├── README.md
 └── LICENSE
 ```

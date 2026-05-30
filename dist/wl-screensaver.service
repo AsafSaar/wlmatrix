@@ -6,10 +6,10 @@ PartOf=graphical-session.target
 [Service]
 Type=simple
 Environment=WAYLAND_DISPLAY=wayland-0
-# Idle before the screensaver starts, in milliseconds (300000 = 5 min).
-Environment=SAVER_IDLE_MS=300000
-# Override the renderer if you like, e.g.:
-# Environment=SAVER_CMD=%h/.local/bin/wlmatrix
+# Idle time, fps, colors, etc. live in ~/.config/wlmatrix/config.toml.
+# Optional overrides (uncomment to force, ignoring the config file):
+# Environment=SAVER_IDLE_MS=300000
+# Environment=SAVER_CMD=%h/.local/bin/wlmatrix --color amber
 ExecStart=%h/.local/bin/wl-screensaver
 Restart=on-failure
 
