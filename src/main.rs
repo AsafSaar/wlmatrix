@@ -73,7 +73,9 @@ impl Default for Config {
             depth: 1,
             mask: None,
             mask_text: None,
-            mask_intensity: 0.5,
+            // 0.85: visible against the heavier "neo" look (bloom + depth + dense
+            // katakana all raise the brightness floor); still reads as a ghost.
+            mask_intensity: 0.85,
         }
     }
 }
@@ -1042,7 +1044,7 @@ OPTIONS:
         --depth <1-4>       Parallax rain layers (1 = flat, 3 = deep)
         --mask <FILE.png>   Hide an image in the rain (any PNG; luminance = brightness)
         --mask-text <TEXT>  Hide a line of text in the rain
-        --mask-intensity <0..1>  How strongly the hidden image glows (default 0.5)
+        --mask-intensity <0..1>  How strongly the hidden image glows (default 0.85)
         --shot <FILE>       Render one frame to a PNG and exit
         --gif  <FILE>       Render an animated looping GIF and exit
 

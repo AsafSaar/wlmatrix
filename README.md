@@ -69,7 +69,9 @@ wlmatrix --mask-text "WAKE UP"              # or a line of text
 The image is laid down as faint glyphs *under* the rain; because compositing is
 additive, the bright heads brighten the masked cells as they fall through, so
 the picture **shimmers into view in motion** rather than sitting there as a
-still. Tune `mask_intensity` (0–1, default `0.5`) for how strongly it reads.
+still. Tune `mask_intensity` (0–1, default `0.85`) for how strongly it reads —
+lower it toward `0.5` for a subtler ghost on plain rain, or keep it high so it
+survives the brighter **neo** look (bloom + depth raise the brightness floor).
 
 ---
 
@@ -187,7 +189,7 @@ color      = "green"    # green|amber|cyan|red|purple|white|"#RRGGBB"
 charset    = "ascii"    # ascii|alnum|binary|digits|katakana|"<literal>"
 # mask     = "/path/to/pic.png"   # hide an image in the rain (luminance × alpha)
 # mask_text = "WAKE UP"           # ...or a line of text (used if `mask` unset)
-mask_intensity = 0.5    # how strongly the hidden image glows, 0–1
+mask_intensity = 0.85   # how strongly the hidden image glows, 0–1
 # font     = "/path/to/Mono.ttf"   # optional; else a system mono is found
 ```
 
@@ -204,7 +206,7 @@ mask_intensity = 0.5    # how strongly the hidden image glows, 0–1
 | `charset` | `ascii` | preset or literal; `katakana` auto-loads a CJK font |
 | `mask` | *(none)* | PNG hidden in the rain; any size/format, luminance × alpha |
 | `mask_text` | *(none)* | text hidden in the rain (used only if `mask` is unset) |
-| `mask_intensity` | `0.5` | 0–1; how strongly the hidden image glows |
+| `mask_intensity` | `0.85` | 0–1; how strongly the hidden image glows (lower ≈ subtler) |
 | `font` | *(auto)* | force a specific `.ttf`/`.ttc` |
 
 ### CLI overrides
