@@ -48,6 +48,16 @@ jobs:
           cp "target/release/wlmatrix${{ matrix.ext }}" \
              "dist-bin/wlmatrix-${{ matrix.target }}${{ matrix.ext }}"
 
+      # macOS: also assemble a double-clickable wlmatrix.app (icon + Info.plist)
+      # and zip it with ditto (preserves the bundle layout + exec bits).
+      - name: Build .app bundle (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          dist/macos/make-app.sh target/release/wlmatrix "$VERSION" dist-bin
+          ( cd dist-bin && ditto -c -k --keepParent wlmatrix.app wlmatrix-macos.app.zip && rm -rf wlmatrix.app )
+
       - uses: actions/upload-artifact@v4
         with:
           name: wlmatrix-${{ matrix.target }}

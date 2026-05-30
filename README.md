@@ -140,7 +140,8 @@ The **renderer is cross-platform**. winit, softbuffer and ab_glyph all support
 Linux (Wayland/X11), macOS and Windows, and wlmatrix deliberately uses **no GPU
 / OpenGL**, so it builds and runs on all three. CI builds a binary for each
 ([`.github/workflows/build.yml`](.github/workflows/build.yml)); tagged releases
-attach `wlmatrix-x86_64-linux`, `wlmatrix-aarch64-macos`, and
+attach `wlmatrix-x86_64-linux`, `wlmatrix-aarch64-macos`,
+`wlmatrix-macos.app.zip` (double-clickable bundle), and
 `wlmatrix-x86_64-windows.exe`.
 
 | | Renders the rain | Exits on input | Auto-launch on idle |
@@ -155,32 +156,35 @@ launcher). What's *not* done yet is first-class OS screensaver integration —
 a Windows `.scr` (`/s`/`/c`/`/p` handling) and a macOS `.saver` bundle or
 `launchd` idle agent. Contributions welcome.
 
-### Running the downloaded binary on macOS
+### macOS: the `.app` and the Gatekeeper warning
 
-The release binaries are **not yet code-signed or notarized**, so on first run
-macOS Gatekeeper blocks it with *"…cannot be opened because it is from an
-unidentified developer"* or offers to **move it to the Trash**. This is expected
-for any unsigned binary — not a problem with the file. Clear the quarantine flag
-and mark it executable:
+Releases ship a double-clickable **`wlmatrix-macos.app.zip`** (Apple-Silicon).
+Unzip it to get `wlmatrix.app` — drop it in `/Applications` or run it in place.
 
-```bash
-# after downloading wlmatrix-aarch64-macos (e.g. to ~/Downloads):
-cd ~/Downloads
-xattr -d com.apple.quarantine wlmatrix-aarch64-macos   # remove the download quarantine
-chmod +x wlmatrix-aarch64-macos
-./wlmatrix-aarch64-macos                                # runs fullscreen; press any key to exit
-```
+The app is **not yet code-signed or notarized**, so on first launch macOS
+Gatekeeper blocks it (*"…cannot be opened because it is from an unidentified
+developer"*, or it offers to **move it to the Trash**). This is expected for any
+unsigned app — nothing is wrong with the file. Two ways past it:
 
-If you'd rather not use the terminal: try to open it once (let it be blocked),
-then go to **System Settings → Privacy & Security**, scroll to the Security
-section, and click **"Open Anyway"** next to wlmatrix.
+- **Right-click** `wlmatrix.app` → **Open**, then confirm **Open** in the dialog
+  (only needed once). On recent macOS, instead open it once, then go to **System
+  Settings → Privacy & Security** and click **"Open Anyway"**.
+- **Terminal:** clear the download quarantine, then open it:
+  ```bash
+  xattr -dr com.apple.quarantine ~/Downloads/wlmatrix.app
+  open ~/Downloads/wlmatrix.app
+  ```
 
-> The download is an Apple-Silicon (`aarch64`) binary. On an Intel Mac, build
-> from source instead (`cargo build --release`) — see [Build & install](#build--install).
+Prefer a bare CLI binary? `wlmatrix-aarch64-macos` is also attached — same
+quarantine rule applies (`xattr -d com.apple.quarantine wlmatrix-aarch64-macos`,
+then `chmod +x`).
+
+> Intel Mac? The downloads are `aarch64`; build from source instead
+> (`cargo build --release`). Source builds are never quarantined. The real fix
+> is signing + notarization with an Apple Developer ID — not set up yet.
 >
-> The proper fix is signing + notarization with an Apple Developer ID; until
-> that's set up, the quarantine step above is the workaround. Building from
-> source never gets quarantined.
+> The bundle is assembled by [`dist/macos/make-app.sh`](dist/macos/make-app.sh)
+> (Info.plist + `.icns` icon) in CI; run it on a Mac to build the `.app` locally.
 
 > **Windows** may likewise show a SmartScreen warning ("Windows protected your
 > PC") for the unsigned `.exe` — click **More info → Run anyway**.

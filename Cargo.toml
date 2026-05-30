@@ -1,6 +1,6 @@
 [package]
 name = "wlmatrix"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 description = "CPU-rendered Matrix-rain screensaver (no GPU); native on Linux Wayland/X11, also builds on macOS and Windows"
 authors = ["Asaf Saar"]
