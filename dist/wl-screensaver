@@ -17,8 +17,12 @@ config_idle() {
   [ -f "$CONFIG" ] || return
   grep -E '^[[:space:]]*idle_ms' "$CONFIG" | head -1 | grep -oE '[0-9]+' | head -1
 }
-IDLE_MS="${SAVER_IDLE_MS:-$(config_idle)}"
-IDLE_MS="${IDLE_MS:-300000}"
+# Resolve the idle threshold fresh each loop so config edits apply without a
+# restart: SAVER_IDLE_MS env > config idle_ms > 5-minute default.
+idle_threshold() {
+  local v="${SAVER_IDLE_MS:-$(config_idle)}"
+  echo "${v:-300000}"
+}
 POLL=1                       # seconds between idle checks (also the dismiss lag)
 
 SAVER_CMD_DEFAULT="$HOME/.local/bin/wlmatrix"
@@ -53,12 +57,13 @@ stop_saver() {
 trap 'stop_saver; exit 0' TERM INT
 
 while true; do
+  idle_ms=$(idle_threshold)
   idle=$(idletime); idle=${idle:-0}
   if [ -z "$SAVER_PID" ] || ! kill -0 "$SAVER_PID" 2>/dev/null; then
     SAVER_PID=""                       # not running (or exited)
-    [ "$idle" -ge "$IDLE_MS" ] && start_saver
+    [ "$idle" -ge "$idle_ms" ] && start_saver
   else
-    [ "$idle" -lt "$IDLE_MS" ] && stop_saver   # user is back → dismiss
+    [ "$idle" -lt "$idle_ms" ] && stop_saver   # user is back → dismiss
   fi
   sleep "$POLL"
 done
