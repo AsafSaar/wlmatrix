@@ -5,6 +5,14 @@
 # wl-screensaver daemon). 300000 = 5 minutes, 60000 = 1 minute.
 idle_ms = 300000
 
+# Visual style preset:
+#   classic = ASCII rain (default)
+#   neo     = the modern look: additive bloom + half-width katakana
+# style = "neo"
+
+# Additive bloom/glow on bright pixels (set by `style = neo`; override here).
+glow = false
+
 # Animation frame rate.
 fps = 30
 

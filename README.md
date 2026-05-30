@@ -32,6 +32,18 @@ render fullscreen. Going native + CPU-only was the only reliable path. See
 The screensaver itself is just the renderer. A small companion daemon
 (`wl-screensaver`) decides *when* to show it, using GNOME/Mutter's idle timer.
 
+### Two looks
+
+**classic** (default) is green ASCII rain. **neo** swaps in half-width katakana
+and adds real **bloom** — a glow only possible because we render true pixels
+(a terminal/CSS Matrix can't). Enable it with `style = "neo"` in the config, or:
+
+```bash
+wlmatrix --style neo
+```
+
+![neo mode — bloom + katakana](docs/neo.gif)
+
 ---
 
 ## Architecture
@@ -136,25 +148,29 @@ screensaver runs; no rebuild, no restart (the idle daemon re-reads `idle_ms`
 each run too). `install.sh` drops a commented default if you don't have one.
 
 ```toml
-idle_ms    = 300000   # idle before it starts, in ms (300000 = 5 min)
-fps        = 30        # animation frame rate
-font_size  = 26        # glyph size; bigger = sparser rain
-speed_min  = 6         # fall-speed range, rows/sec
+style      = "classic" # classic (ASCII)  |  neo (bloom + katakana)
+glow       = false     # additive bloom on bright pixels
+idle_ms    = 300000    # idle before it starts, in ms (300000 = 5 min)
+fps        = 30         # animation frame rate
+font_size  = 26         # glyph size; bigger = sparser rain
+speed_min  = 6          # fall-speed range, rows/sec
 speed_max  = 24
-color      = "green"   # green|amber|cyan|red|purple|white|"#RRGGBB"
-charset    = "ascii"   # ascii|alnum|binary|digits|katakana|"<literal>"
+color      = "green"    # green|amber|cyan|red|purple|white|"#RRGGBB"
+charset    = "ascii"    # ascii|alnum|binary|digits|katakana|"<literal>"
 # font     = "/path/to/Mono.ttf"   # optional; else a system mono is found
 ```
 
 | Key | Default | Notes |
 |-----|---------|-------|
+| `style` | `classic` | `neo` turns on glow + katakana in one switch |
+| `glow` | `false` | additive bloom (CPU, ~1/4-res) |
 | `idle_ms` | `300000` | read by the daemon; ms before the saver starts |
 | `fps` | `30` | 1–240 |
 | `font_size` | `26` | pixels; controls rain density |
 | `speed_min` / `speed_max` | `6` / `24` | rows per second |
 | `color` | `green` | preset name or `#RRGGBB` |
-| `charset` | `ascii` | preset or a literal string (`katakana` needs a CJK font) |
-| `font` | *(auto)* | force a specific `.ttf` |
+| `charset` | `ascii` | preset or literal; `katakana` auto-loads a CJK font |
+| `font` | *(auto)* | force a specific `.ttf`/`.ttc` |
 
 ### CLI overrides
 

@@ -26,6 +26,15 @@ const FONT_CANDIDATES: &[&str] = &[
     "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
     "/usr/share/fonts/truetype/noto/NotoMono-Regular.ttf",
 ];
+// Fallback fonts for non-latin charsets (e.g. katakana). .ttc collections are
+// loaded at face 0.
+const CJK_CANDIDATES: &[&str] = &[
+    "/usr/share/fonts/opentype/noto/NotoSansMonoCJKjp-Regular.otf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+];
+// half-width katakana — single-width, fits the rain grid (full-width would overlap)
+const KATAKANA: std::ops::RangeInclusive<char> = '\u{FF66}'..='\u{FF9D}';
 const DEFAULT_CHARSET: &str =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@#$%&*+-/<>=?!:";
 
@@ -41,6 +50,7 @@ struct Config {
     trail: (u8, u8, u8),
     charset: String,
     font_path: Option<String>,
+    glow: bool, // additive bloom on bright pixels ("neo" look)
 }
 
 impl Default for Config {
@@ -54,8 +64,13 @@ impl Default for Config {
             trail: (0, 255, 40),
             charset: DEFAULT_CHARSET.to_string(),
             font_path: None,
+            glow: false,
         }
     }
+}
+
+fn parse_bool(s: &str) -> bool {
+    matches!(s.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on")
 }
 
 /// `~/.config/wlmatrix/config.toml` (respects $XDG_CONFIG_HOME).
@@ -137,6 +152,17 @@ fn apply_key(cfg: &mut Config, key: &str, val: &str) {
         }
         "charset" => cfg.charset = resolve_charset(val),
         "font" => cfg.font_path = Some(val.to_string()),
+        "glow" => cfg.glow = parse_bool(val),
+        "style" => match val.trim().to_lowercase().as_str() {
+            // "neo" = the modern look: bloom + katakana. Explicit charset/glow
+            // keys placed after `style` in the file (or CLI flags) still win.
+            "neo" => {
+                cfg.glow = true;
+                cfg.charset = KATAKANA.collect();
+            }
+            "classic" | "matrix" => cfg.glow = false,
+            _ => {}
+        },
         "idle_ms" => {} // consumed by the wl-screensaver daemon, not the renderer
         _ => {}
     }
@@ -183,8 +209,8 @@ fn resolve_charset(s: &str) -> String {
         "alnum" => "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789".to_string(),
         "binary" => "01".to_string(),
         "digits" => "0123456789".to_string(),
-        // half-width katakana — needs a CJK-capable font (set `font` in config)
-        "katakana" => ('\u{FF66}'..='\u{FF9D}').collect(),
+        // half-width katakana — needs a CJK-capable font (auto-detected)
+        "katakana" => KATAKANA.collect(),
         _ => s.to_string(),
     };
     if out.chars().next().is_none() {
@@ -253,31 +279,61 @@ struct App {
     speed_max: f32,
     head: (u8, u8, u8),
     trail: (u8, u8, u8),
+    glow: bool,
+}
+
+/// Load a font that can render `charset`, trying the configured path, then the
+/// monospace candidates, then the CJK candidates (or CJK first for non-latin
+/// charsets). `.ttc` collections load face 0. Returns (font, covers_charset).
+fn load_font(charset: &str, font_path: &Option<String>) -> (FontVec, bool) {
+    let needs_cjk = charset.chars().any(|c| c as u32 > 0x2FF);
+    let mut paths: Vec<String> = Vec::new();
+    if let Some(p) = font_path {
+        paths.push(p.clone());
+    }
+    let (a, b): (&[&str], &[&str]) = if needs_cjk {
+        (CJK_CANDIDATES, FONT_CANDIDATES)
+    } else {
+        (FONT_CANDIDATES, CJK_CANDIDATES)
+    };
+    paths.extend(a.iter().chain(b).map(|s| s.to_string()));
+
+    let sample = charset.chars().next().unwrap_or('M');
+    let mut fallback: Option<FontVec> = None;
+    for p in &paths {
+        let Ok(data) = std::fs::read(p) else { continue };
+        let Ok(font) = FontVec::try_from_vec_and_index(data, 0) else { continue };
+        if font.glyph_id(sample).0 != 0 {
+            return (font, true); // this font covers the charset
+        }
+        fallback.get_or_insert(font);
+    }
+    (fallback.expect("no usable font found on this system"), false)
 }
 
 impl App {
     fn new(cfg: &Config) -> App {
-        let path = cfg
-            .font_path
-            .clone()
-            .filter(|p| Path::new(p).exists())
-            .or_else(|| {
-                FONT_CANDIDATES
-                    .iter()
-                    .find(|p| Path::new(p).exists())
-                    .map(|s| s.to_string())
-            })
-            .unwrap_or_else(|| FONT_CANDIDATES[0].to_string());
-        let data = std::fs::read(&path).expect("cannot read font file");
-        let font = FontVec::try_from_vec(data).expect("invalid font");
+        let needs_cjk = cfg.charset.chars().any(|c| c as u32 > 0x2FF);
+        let (font, covered) = load_font(&cfg.charset, &cfg.font_path);
+        let charset = if needs_cjk && !covered {
+            eprintln!("wlmatrix: no font found covering this charset; falling back to ASCII");
+            DEFAULT_CHARSET.to_string()
+        } else {
+            cfg.charset.clone()
+        };
         let scaled = font.as_scaled(cfg.font_px);
         let ascent = scaled.ascent();
-        let advance = scaled.h_advance(font.glyph_id('M'));
-        let cell_w = advance.ceil().max(1.0) as usize;
+        // Size the cell to the widest glyph so proportional (CJK) fonts don't overlap.
+        let cell_w = charset
+            .chars()
+            .map(|c| scaled.h_advance(font.glyph_id(c)))
+            .fold(0.0_f32, f32::max)
+            .ceil()
+            .max(1.0) as usize;
         let cell_h = (scaled.ascent() - scaled.descent()).ceil().max(1.0) as usize;
 
         let mut glyphs = Vec::new();
-        for ch in cfg.charset.chars() {
+        for ch in charset.chars() {
             let glyph: Glyph = font
                 .glyph_id(ch)
                 .with_scale_and_position(cfg.font_px, Point { x: 0.0, y: 0.0 });
@@ -326,6 +382,7 @@ impl App {
             speed_max: cfg.speed_max,
             head: cfg.head,
             trail: cfg.trail,
+            glow: cfg.glow,
         }
     }
 
@@ -410,6 +467,9 @@ impl App {
             &mut buf, width, height, &self.glyphs, &self.columns, self.cell_w, self.cell_h,
             self.rows, self.head, self.trail,
         );
+        if self.glow {
+            apply_bloom(&mut buf, width, height);
+        }
         let _ = buf.present();
     }
 }
@@ -485,6 +545,76 @@ fn blit(buf: &mut [u32], width: usize, height: usize, ox: i32, oy: i32, g: &Glyp
             let gg = (gr * a / 255) & 0xFF;
             let bb = (b * a / 255) & 0xFF;
             buf[py as usize * width + px as usize] = (rr << 16) | (gg << 8) | bb;
+        }
+    }
+}
+
+/// Additive bloom: blur the bright pixels and add the soft halo back, in place.
+/// A cheap CPU approximation done at 1/4 resolution — this is what gives the
+/// "neo" look its glow, and it's only possible because we own real pixels.
+fn apply_bloom(buf: &mut [u32], w: usize, h: usize) {
+    const D: usize = 4; // downsample factor
+    const RADIUS: usize = 3; // blur radius in downsampled pixels
+    const GAIN: f32 = 0.6; // how strongly the halo adds back
+    let (lw, lh) = (w.div_ceil(D), h.div_ceil(D));
+    let mut lr = vec![0f32; lw * lh];
+    let mut lg = vec![0f32; lw * lh];
+    let mut lb = vec![0f32; lw * lh];
+    // downsample by max — keeps bright isolated leaders glowing
+    for y in 0..h {
+        let ly = y / D;
+        for x in 0..w {
+            let px = buf[y * w + x];
+            let li = ly * lw + x / D;
+            lr[li] = lr[li].max(((px >> 16) & 0xFF) as f32);
+            lg[li] = lg[li].max(((px >> 8) & 0xFF) as f32);
+            lb[li] = lb[li].max((px & 0xFF) as f32);
+        }
+    }
+    for chan in [&mut lr, &mut lg, &mut lb] {
+        box_blur(chan, lw, lh, RADIUS);
+        box_blur(chan, lw, lh, RADIUS); // two passes ≈ gaussian
+    }
+    for y in 0..h {
+        let ly = y / D;
+        for x in 0..w {
+            let li = ly * lw + x / D;
+            let i = y * w + x;
+            let px = buf[i];
+            let r = (((px >> 16) & 0xFF) as f32 + lr[li] * GAIN).min(255.0) as u32;
+            let g = (((px >> 8) & 0xFF) as f32 + lg[li] * GAIN).min(255.0) as u32;
+            let b = ((px & 0xFF) as f32 + lb[li] * GAIN).min(255.0) as u32;
+            buf[i] = (r << 16) | (g << 8) | b;
+        }
+    }
+}
+
+/// Separable normalized box blur (edges clamped).
+fn box_blur(data: &mut [f32], w: usize, h: usize, r: usize) {
+    if r == 0 || w == 0 || h == 0 {
+        return;
+    }
+    let win = (2 * r + 1) as f32;
+    let mut tmp = vec![0f32; w * h];
+    for y in 0..h {
+        let row = y * w;
+        for x in 0..w {
+            let mut sum = 0.0;
+            for k in 0..=2 * r {
+                let xx = (x + k).saturating_sub(r).min(w - 1);
+                sum += data[row + xx];
+            }
+            tmp[row + x] = sum / win;
+        }
+    }
+    for x in 0..w {
+        for y in 0..h {
+            let mut sum = 0.0;
+            for k in 0..=2 * r {
+                let yy = (y + k).saturating_sub(r).min(h - 1);
+                sum += tmp[yy * w + x];
+            }
+            data[y * w + x] = sum / win;
         }
     }
 }
@@ -575,6 +705,8 @@ OPTIONS:
         --speed <MIN-MAX>   Fall speed range in rows/sec (e.g. 4-20)
         --color <C>         green|amber|cyan|red|purple|white|#RRGGBB
         --charset <C>       ascii|alnum|binary|digits|katakana|<literal chars>
+        --style <S>         classic | neo  (neo = bloom + katakana)
+        --glow / --no-glow  Toggle additive bloom
         --shot <FILE>       Render one frame to a PNG and exit
         --gif  <FILE>       Render an animated looping GIF and exit
 
@@ -604,6 +736,9 @@ fn render_shot(cfg: &Config, path: &str) {
     }
     let mut buf = vec![0u32; w * h];
     paint_frame(&mut buf, w, h, &app.glyphs, &app.columns, app.cell_w, app.cell_h, app.rows, app.head, app.trail);
+    if cfg.glow {
+        apply_bloom(&mut buf, w, h);
+    }
 
     let mut rgb = Vec::with_capacity(w * h * 3);
     for px in &buf {
@@ -655,6 +790,9 @@ fn render_gif(cfg: &Config, path: &str) {
     for _ in 0..frames {
         app.step(0.05);
         paint_frame(&mut buf, w, h, &app.glyphs, &app.columns, app.cell_w, app.cell_h, app.rows, app.head, app.trail);
+        if cfg.glow {
+            apply_bloom(&mut buf, w, h);
+        }
         let mut indexed = vec![0u8; w * h];
         for (i, px) in buf.iter().enumerate() {
             let r = (px >> 16) & 0xFF;
@@ -736,6 +874,12 @@ fn main() {
                 let v = next_val(&args, &mut i, "--charset requires a value");
                 apply_key(&mut cfg, "charset", &v);
             }
+            "--style" => {
+                let v = next_val(&args, &mut i, "--style requires classic|neo");
+                apply_key(&mut cfg, "style", &v);
+            }
+            "--glow" => apply_key(&mut cfg, "glow", "true"),
+            "--no-glow" => apply_key(&mut cfg, "glow", "false"),
             "--shot" => action = Action::Shot(next_val(&args, &mut i, "--shot requires a file path")),
             "--gif" => action = Action::Gif(next_val(&args, &mut i, "--gif requires a file path")),
             other => die(&format!("unknown argument '{other}'. Try --help.")),
