@@ -44,6 +44,15 @@ wlmatrix --style neo
 
 ![neo mode — bloom + katakana](docs/neo.gif)
 
+Add **`depth`** for parallax — 2–3 rain layers at different sizes, speeds and
+brightness composite into a volumetric "falling through code" effect:
+
+```bash
+wlmatrix --style neo --depth 3
+```
+
+![depth/parallax — neo + 3 layers](docs/depth.gif)
+
 ---
 
 ## Architecture
@@ -150,6 +159,7 @@ each run too). `install.sh` drops a commented default if you don't have one.
 ```toml
 style      = "classic" # classic (ASCII)  |  neo (bloom + katakana)
 glow       = false     # additive bloom on bright pixels
+depth      = 1         # parallax rain layers: 1 = flat, 2-3 = volumetric
 idle_ms    = 300000    # idle before it starts, in ms (300000 = 5 min)
 fps        = 30         # animation frame rate
 font_size  = 26         # glyph size; bigger = sparser rain
@@ -164,6 +174,7 @@ charset    = "ascii"    # ascii|alnum|binary|digits|katakana|"<literal>"
 |-----|---------|-------|
 | `style` | `classic` | `neo` turns on glow + katakana in one switch |
 | `glow` | `false` | additive bloom (CPU, ~1/4-res) |
+| `depth` | `1` | parallax layers (1–4); far layers smaller/slower/dimmer |
 | `idle_ms` | `300000` | read by the daemon; ms before the saver starts |
 | `fps` | `30` | 1–240 |
 | `font_size` | `26` | pixels; controls rain density |

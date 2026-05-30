@@ -13,6 +13,10 @@ idle_ms = 300000
 # Additive bloom/glow on bright pixels (set by `style = neo`; override here).
 glow = false
 
+# Parallax depth: number of rain layers (1 = flat, 2-3 = volumetric).
+# Far layers are smaller, slower and dimmer than near ones.
+depth = 1
+
 # Animation frame rate.
 fps = 30
 

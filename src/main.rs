@@ -50,7 +50,8 @@ struct Config {
     trail: (u8, u8, u8),
     charset: String,
     font_path: Option<String>,
-    glow: bool, // additive bloom on bright pixels ("neo" look)
+    glow: bool,    // additive bloom on bright pixels ("neo" look)
+    depth: usize,  // number of parallax rain layers (1 = flat)
 }
 
 impl Default for Config {
@@ -65,6 +66,7 @@ impl Default for Config {
             charset: DEFAULT_CHARSET.to_string(),
             font_path: None,
             glow: false,
+            depth: 1,
         }
     }
 }
@@ -153,6 +155,11 @@ fn apply_key(cfg: &mut Config, key: &str, val: &str) {
         "charset" => cfg.charset = resolve_charset(val),
         "font" => cfg.font_path = Some(val.to_string()),
         "glow" => cfg.glow = parse_bool(val),
+        "depth" => {
+            if let Ok(v) = val.parse::<usize>() {
+                cfg.depth = v.clamp(1, 4);
+            }
+        }
         "style" => match val.trim().to_lowercase().as_str() {
             // "neo" = the modern look: bloom + katakana. Explicit charset/glow
             // keys placed after `style` in the file (or CLI flags) still win.
@@ -259,15 +266,23 @@ struct Column {
 
 type Surf = softbuffer::Surface<Rc<Window>, Rc<Window>>;
 
-struct App {
-    window: Option<Rc<Window>>,
-    surface: Option<Surf>,
-    glyphs: Vec<GlyphBmp>, // one per charset char
+/// One depth plane of rain. With depth > 1, far layers are smaller, slower and
+/// dimmer than near ones; the planes are composited back-to-front (additively).
+struct Layer {
+    glyphs: Vec<GlyphBmp>, // glyph cache at this layer's size
     cell_w: usize,
     cell_h: usize,
     cols: usize,
     rows: usize,
     columns: Vec<Column>,
+    speed_scale: f32, // multiplies the base fall speed
+    brightness: f32,  // 0..1, dims far layers
+}
+
+struct App {
+    window: Option<Rc<Window>>,
+    surface: Option<Surf>,
+    layers: Vec<Layer>, // back (far) to front (near)
     rng: Rng,
     last: Instant,
     next_frame: Instant,
@@ -280,6 +295,52 @@ struct App {
     head: (u8, u8, u8),
     trail: (u8, u8, u8),
     glow: bool,
+}
+
+/// Rasterize the charset's glyphs at `font_px`; returns (glyphs, cell_w, cell_h).
+fn build_glyphs(font: &FontVec, charset: &str, font_px: f32) -> (Vec<GlyphBmp>, usize, usize) {
+    let scaled = font.as_scaled(font_px);
+    let ascent = scaled.ascent();
+    // Size the cell to the widest glyph so proportional (CJK) fonts don't overlap.
+    let cell_w = charset
+        .chars()
+        .map(|c| scaled.h_advance(font.glyph_id(c)))
+        .fold(0.0_f32, f32::max)
+        .ceil()
+        .max(1.0) as usize;
+    let cell_h = (scaled.ascent() - scaled.descent()).ceil().max(1.0) as usize;
+
+    let mut glyphs = Vec::new();
+    for ch in charset.chars() {
+        let glyph: Glyph = font
+            .glyph_id(ch)
+            .with_scale_and_position(font_px, Point { x: 0.0, y: 0.0 });
+        if let Some(outline) = font.outline_glyph(glyph) {
+            let b = outline.px_bounds();
+            let gw = b.width().ceil() as usize;
+            let gh = b.height().ceil() as usize;
+            let mut cov = vec![0u8; gw * gh];
+            outline.draw(|x, y, c| {
+                let (xi, yi) = (x as usize, y as usize);
+                if xi < gw && yi < gh {
+                    cov[yi * gw + xi] = (c * 255.0) as u8;
+                }
+            });
+            glyphs.push(GlyphBmp {
+                w: gw,
+                h: gh,
+                left: b.min.x.round() as i32,
+                top: (ascent + b.min.y).round() as i32,
+                cov,
+            });
+        } else {
+            glyphs.push(GlyphBmp { w: 0, h: 0, left: 0, top: 0, cov: vec![] });
+        }
+    }
+    if glyphs.is_empty() {
+        glyphs.push(GlyphBmp { w: 0, h: 0, left: 0, top: 0, cov: vec![] });
+    }
+    (glyphs, cell_w, cell_h)
 }
 
 /// Load a font that can render `charset`, trying the configured path, then the
@@ -321,57 +382,33 @@ impl App {
         } else {
             cfg.charset.clone()
         };
-        let scaled = font.as_scaled(cfg.font_px);
-        let ascent = scaled.ascent();
-        // Size the cell to the widest glyph so proportional (CJK) fonts don't overlap.
-        let cell_w = charset
-            .chars()
-            .map(|c| scaled.h_advance(font.glyph_id(c)))
-            .fold(0.0_f32, f32::max)
-            .ceil()
-            .max(1.0) as usize;
-        let cell_h = (scaled.ascent() - scaled.descent()).ceil().max(1.0) as usize;
-
-        let mut glyphs = Vec::new();
-        for ch in charset.chars() {
-            let glyph: Glyph = font
-                .glyph_id(ch)
-                .with_scale_and_position(cfg.font_px, Point { x: 0.0, y: 0.0 });
-            if let Some(outline) = font.outline_glyph(glyph) {
-                let b = outline.px_bounds();
-                let gw = b.width().ceil() as usize;
-                let gh = b.height().ceil() as usize;
-                let mut cov = vec![0u8; gw * gh];
-                outline.draw(|x, y, c| {
-                    let (xi, yi) = (x as usize, y as usize);
-                    if xi < gw && yi < gh {
-                        cov[yi * gw + xi] = (c * 255.0) as u8;
-                    }
-                });
-                glyphs.push(GlyphBmp {
-                    w: gw,
-                    h: gh,
-                    left: b.min.x.round() as i32,
-                    top: (ascent + b.min.y).round() as i32,
-                    cov,
-                });
+        let depth = cfg.depth.clamp(1, 4);
+        let mut layers = Vec::with_capacity(depth);
+        for j in 0..depth {
+            // j = 0 is farthest, depth-1 is nearest; t in (0, 1].
+            let t = (j + 1) as f32 / depth as f32;
+            let (size, speed_scale, brightness) = if depth == 1 {
+                (1.0, 1.0, 1.0)
             } else {
-                glyphs.push(GlyphBmp { w: 0, h: 0, left: 0, top: 0, cov: vec![] });
-            }
-        }
-        if glyphs.is_empty() {
-            glyphs.push(GlyphBmp { w: 0, h: 0, left: 0, top: 0, cov: vec![] });
+                (0.5 + 0.5 * t, 0.45 + 0.55 * t, 0.4 + 0.6 * t)
+            };
+            let (glyphs, cell_w, cell_h) = build_glyphs(&font, &charset, cfg.font_px * size);
+            layers.push(Layer {
+                glyphs,
+                cell_w,
+                cell_h,
+                cols: 0,
+                rows: 0,
+                columns: Vec::new(),
+                speed_scale,
+                brightness,
+            });
         }
 
         App {
             window: None,
             surface: None,
-            glyphs,
-            cell_w,
-            cell_h,
-            cols: 0,
-            rows: 0,
-            columns: Vec::new(),
+            layers,
             rng: Rng(0x9E3779B97F4A7C15),
             last: Instant::now(),
             next_frame: Instant::now(),
@@ -386,57 +423,62 @@ impl App {
         }
     }
 
-    fn rand_speed(&mut self) -> f32 {
-        self.speed_min + self.rng.frac() * (self.speed_max - self.speed_min)
-    }
-
     fn rebuild_grid(&mut self, width: usize, height: usize) {
-        self.cols = (width / self.cell_w).max(1);
-        self.rows = (height / self.cell_h).max(1);
-        let rows = self.rows;
-        let nglyphs = self.glyphs.len() as u32;
-        let mut columns = Vec::with_capacity(self.cols);
-        for _ in 0..self.cols {
-            let mut chars = vec![0u8; rows];
-            for c in chars.iter_mut() {
-                *c = self.rng.below(nglyphs) as u8;
+        let (smin, smax) = (self.speed_min, self.speed_max);
+        for li in 0..self.layers.len() {
+            let cell_w = self.layers[li].cell_w;
+            let cell_h = self.layers[li].cell_h;
+            let speed_scale = self.layers[li].speed_scale;
+            let nglyphs = self.layers[li].glyphs.len() as u32;
+            let cols = (width / cell_w).max(1);
+            let rows = (height / cell_h).max(1);
+            let mut columns = Vec::with_capacity(cols);
+            for _ in 0..cols {
+                let mut chars = vec![0u8; rows];
+                for c in chars.iter_mut() {
+                    *c = self.rng.below(nglyphs) as u8;
+                }
+                let speed = (smin + self.rng.frac() * (smax - smin)) * speed_scale;
+                let len = 6 + self.rng.below((rows as u32 / 2).max(7)) as i32;
+                let head = -(self.rng.below(rows as u32) as f32);
+                columns.push(Column { head, speed, len, chars });
             }
-            let speed = self.rand_speed();
-            columns.push(Column {
-                head: -(self.rng.below(rows as u32) as f32),
-                speed,
-                len: 6 + self.rng.below((rows as u32 / 2).max(7)) as i32,
-                chars,
-            });
+            let layer = &mut self.layers[li];
+            layer.cols = cols;
+            layer.rows = rows;
+            layer.columns = columns;
         }
-        self.columns = columns;
         self.inited_grid = true;
     }
 
     fn step(&mut self, dt: f32) {
-        let rows = self.rows as i32;
-        let nglyphs = self.glyphs.len() as u32;
-        for idx in 0..self.columns.len() {
-            let (old_i, new_i) = {
-                let col = &mut self.columns[idx];
-                let old_i = col.head.floor() as i32;
-                col.head += col.speed * dt;
-                (old_i, col.head.floor() as i32)
-            };
-            for y in (old_i + 1)..=new_i {
-                if y >= 0 && y < rows {
-                    let c = (self.rng.next_u64() % nglyphs as u64) as u8;
-                    self.columns[idx].chars[y as usize] = c;
+        let (smin, smax) = (self.speed_min, self.speed_max);
+        for li in 0..self.layers.len() {
+            let rows = self.layers[li].rows as i32;
+            let nglyphs = self.layers[li].glyphs.len() as u32;
+            let speed_scale = self.layers[li].speed_scale;
+            for ci in 0..self.layers[li].columns.len() {
+                let (old_i, new_i) = {
+                    let col = &mut self.layers[li].columns[ci];
+                    let old_i = col.head.floor() as i32;
+                    col.head += col.speed * dt;
+                    (old_i, col.head.floor() as i32)
+                };
+                for y in (old_i + 1)..=new_i {
+                    if y >= 0 && y < rows {
+                        let c = (self.rng.next_u64() % nglyphs as u64) as u8;
+                        self.layers[li].columns[ci].chars[y as usize] = c;
+                    }
                 }
-            }
-            if new_i - self.columns[idx].len > rows {
-                let speed = self.rand_speed();
-                let len = 6 + self.rng.below((rows as u32 / 2).max(7)) as i32;
-                let head = -(self.rng.below(rows as u32 + 1) as f32) - len as f32;
-                let col = &mut self.columns[idx];
-                col.head = head;
-                col.speed = speed;
-                col.len = len;
+                if new_i - self.layers[li].columns[ci].len > rows {
+                    let speed = (smin + self.rng.frac() * (smax - smin)) * speed_scale;
+                    let len = 6 + self.rng.below((rows as u32 / 2).max(7)) as i32;
+                    let head = -(self.rng.below(rows as u32 + 1) as f32) - len as f32;
+                    let col = &mut self.layers[li].columns[ci];
+                    col.head = head;
+                    col.speed = speed;
+                    col.len = len;
+                }
             }
         }
     }
@@ -463,14 +505,43 @@ impl App {
             Ok(b) => b,
             Err(_) => return,
         };
-        paint_frame(
-            &mut buf, width, height, &self.glyphs, &self.columns, self.cell_w, self.cell_h,
-            self.rows, self.head, self.trail,
-        );
-        if self.glow {
-            apply_bloom(&mut buf, width, height);
-        }
+        render_layers(&mut buf, width, height, &self.layers, self.head, self.trail, self.glow);
         let _ = buf.present();
+    }
+}
+
+/// Composite all depth layers (far → near, additively) into `buf`, then bloom.
+fn render_layers(
+    buf: &mut [u32],
+    width: usize,
+    height: usize,
+    layers: &[Layer],
+    head: (u8, u8, u8),
+    trail: (u8, u8, u8),
+    glow: bool,
+) {
+    for px in buf.iter_mut() {
+        *px = 0; // clear once; layers add on top
+    }
+    let dim = |c: (u8, u8, u8), b: f32| {
+        ((c.0 as f32 * b) as u8, (c.1 as f32 * b) as u8, (c.2 as f32 * b) as u8)
+    };
+    for layer in layers {
+        paint_frame(
+            buf,
+            width,
+            height,
+            &layer.glyphs,
+            &layer.columns,
+            layer.cell_w,
+            layer.cell_h,
+            layer.rows,
+            dim(head, layer.brightness),
+            dim(trail, layer.brightness),
+        );
+    }
+    if glow {
+        apply_bloom(buf, width, height);
     }
 }
 
@@ -489,9 +560,7 @@ fn paint_frame(
     head: (u8, u8, u8),
     trail: (u8, u8, u8),
 ) {
-    for px in buf.iter_mut() {
-        *px = 0; // clear to black
-    }
+    // additive: caller clears once, then each depth layer adds on top
     let cw = cell_w as i32;
     let chh = cell_h as i32;
     for (cx, col) in columns.iter().enumerate() {
@@ -541,10 +610,13 @@ fn blit(buf: &mut [u32], width: usize, height: usize, ox: i32, oy: i32, g: &Glyp
             if px < 0 || px >= width as i32 {
                 continue;
             }
-            let rr = (r * a / 255) & 0xFF;
-            let gg = (gr * a / 255) & 0xFF;
-            let bb = (b * a / 255) & 0xFF;
-            buf[py as usize * width + px as usize] = (rr << 16) | (gg << 8) | bb;
+            let idx = py as usize * width + px as usize;
+            let old = buf[idx];
+            // additive blend (saturating) so overlapping depth layers brighten
+            let rr = (((old >> 16) & 0xFF) + r * a / 255).min(255);
+            let gg = (((old >> 8) & 0xFF) + gr * a / 255).min(255);
+            let bb = ((old & 0xFF) + b * a / 255).min(255);
+            buf[idx] = (rr << 16) | (gg << 8) | bb;
         }
     }
 }
@@ -707,6 +779,7 @@ OPTIONS:
         --charset <C>       ascii|alnum|binary|digits|katakana|<literal chars>
         --style <S>         classic | neo  (neo = bloom + katakana)
         --glow / --no-glow  Toggle additive bloom
+        --depth <1-4>       Parallax rain layers (1 = flat, 3 = deep)
         --shot <FILE>       Render one frame to a PNG and exit
         --gif  <FILE>       Render an animated looping GIF and exit
 
@@ -735,10 +808,7 @@ fn render_shot(cfg: &Config, path: &str) {
         app.step(0.05);
     }
     let mut buf = vec![0u32; w * h];
-    paint_frame(&mut buf, w, h, &app.glyphs, &app.columns, app.cell_w, app.cell_h, app.rows, app.head, app.trail);
-    if cfg.glow {
-        apply_bloom(&mut buf, w, h);
-    }
+    render_layers(&mut buf, w, h, &app.layers, app.head, app.trail, cfg.glow);
 
     let mut rgb = Vec::with_capacity(w * h * 3);
     for px in &buf {
@@ -759,8 +829,8 @@ fn render_shot(cfg: &Config, path: &str) {
 /// respects the configured colors.
 fn render_gif(cfg: &Config, path: &str) {
     use std::borrow::Cow;
-    let (w, h) = (800usize, 450usize);
-    let (frames, delay, levels) = (60, 5u16, 32usize);
+    let (w, h) = (720usize, 405usize);
+    let (frames, delay, levels) = (48, 5u16, 32usize);
 
     let mut gcfg = cfg.clone();
     gcfg.font_px = gcfg.font_px.min(15.0);
@@ -789,10 +859,7 @@ fn render_gif(cfg: &Config, path: &str) {
     let mut buf = vec![0u32; w * h];
     for _ in 0..frames {
         app.step(0.05);
-        paint_frame(&mut buf, w, h, &app.glyphs, &app.columns, app.cell_w, app.cell_h, app.rows, app.head, app.trail);
-        if cfg.glow {
-            apply_bloom(&mut buf, w, h);
-        }
+        render_layers(&mut buf, w, h, &app.layers, app.head, app.trail, cfg.glow);
         let mut indexed = vec![0u8; w * h];
         for (i, px) in buf.iter().enumerate() {
             let r = (px >> 16) & 0xFF;
@@ -880,6 +947,10 @@ fn main() {
             }
             "--glow" => apply_key(&mut cfg, "glow", "true"),
             "--no-glow" => apply_key(&mut cfg, "glow", "false"),
+            "--depth" => {
+                let v = next_val(&args, &mut i, "--depth requires 1-4");
+                apply_key(&mut cfg, "depth", &v);
+            }
             "--shot" => action = Action::Shot(next_val(&args, &mut i, "--shot requires a file path")),
             "--gif" => action = Action::Gif(next_val(&args, &mut i, "--gif requires a file path")),
             other => die(&format!("unknown argument '{other}'. Try --help.")),
