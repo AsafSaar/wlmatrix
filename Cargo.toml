@@ -14,6 +14,7 @@ categories = ["graphics", "gui"]
 winit = "0.30"
 softbuffer = "0.4"
 ab_glyph = "0.2"
+png = "0.17"   # only used by `--shot` (render a frame to PNG)
 
 [profile.release]
 opt-level = 3

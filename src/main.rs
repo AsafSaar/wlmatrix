@@ -203,49 +203,62 @@ impl App {
             Ok(b) => b,
             Err(_) => return,
         };
-        // clear to black
-        for px in buf.iter_mut() {
-            *px = 0;
-        }
-
-        let cell_w = self.cell_w as i32;
-        let cell_h = self.cell_h as i32;
-        for (cx, col) in self.columns.iter().enumerate() {
-            let head_i = col.head.floor() as i32;
-            let cell_x = cx as i32 * cell_w;
-            for k in 0..=col.len {
-                let y = head_i - k;
-                if y < 0 || y >= self.rows as i32 {
-                    continue;
-                }
-                let ch_idx = col.chars[y as usize] as usize;
-                let g = &self.glyphs[ch_idx];
-                if g.cov.is_empty() {
-                    continue;
-                }
-                // color: head bright white, then green fading along the trail
-                let (r, gr, b) = if k == 0 {
-                    (220u32, 255, 220)
-                } else {
-                    let t = 1.0 - (k as f32 / col.len as f32);
-                    let inten = (0.25 + 0.75 * t).min(1.0);
-                    (0, (255.0 * inten) as u32, (40.0 * inten) as u32)
-                };
-                let cell_y = y * cell_h;
-                blit(
-                    &mut buf,
-                    width,
-                    height,
-                    cell_x + g.left,
-                    cell_y + g.top,
-                    g,
-                    r,
-                    gr,
-                    b,
-                );
-            }
-        }
+        paint_frame(
+            &mut buf,
+            width,
+            height,
+            &self.glyphs,
+            &self.columns,
+            self.cell_w,
+            self.cell_h,
+            self.rows,
+        );
         let _ = buf.present();
+    }
+}
+
+/// Draw one frame of rain into `buf` (pixels are 0x00RRGGBB). Shared by the live
+/// renderer and by `--shot` (which renders into a plain Vec for PNG export).
+#[allow(clippy::too_many_arguments)]
+fn paint_frame(
+    buf: &mut [u32],
+    width: usize,
+    height: usize,
+    glyphs: &[GlyphBmp],
+    columns: &[Column],
+    cell_w: usize,
+    cell_h: usize,
+    rows: usize,
+) {
+    for px in buf.iter_mut() {
+        *px = 0; // clear to black
+    }
+    let cw = cell_w as i32;
+    let chh = cell_h as i32;
+    for (cx, col) in columns.iter().enumerate() {
+        let head_i = col.head.floor() as i32;
+        let cell_x = cx as i32 * cw;
+        for k in 0..=col.len {
+            let y = head_i - k;
+            if y < 0 || y >= rows as i32 {
+                continue;
+            }
+            let ch_idx = col.chars[y as usize] as usize;
+            let g = &glyphs[ch_idx];
+            if g.cov.is_empty() {
+                continue;
+            }
+            // head is bright white; the trail fades from bright to dark green
+            let (r, gr, b) = if k == 0 {
+                (220u32, 255, 220)
+            } else {
+                let t = 1.0 - (k as f32 / col.len as f32);
+                let inten = (0.25 + 0.75 * t).min(1.0);
+                (0, (255.0 * inten) as u32, (40.0 * inten) as u32)
+            };
+            let cell_y = y * chh;
+            blit(buf, width, height, cell_x + g.left, cell_y + g.top, g, r, gr, b);
+        }
     }
 }
 
@@ -353,7 +366,76 @@ impl ApplicationHandler for App {
     }
 }
 
+const HELP: &str = "\
+wlmatrix — native Wayland Matrix-rain screensaver (CPU-rendered, no GPU)
+
+USAGE:
+    wlmatrix [OPTIONS]
+
+OPTIONS:
+    -h, --help           Show this help and exit
+    -V, --version        Show version and exit
+        --shot <FILE>    Render one frame to a PNG and exit (for previews/README)
+
+With no options it runs fullscreen and exits on any key or mouse input. It is
+normally launched on idle by the companion wl-screensaver daemon.
+";
+
+/// Render one steady-state frame (16:9) straight to a PNG — no window needed.
+fn render_shot(path: &str) {
+    let (w, h) = (1600usize, 900usize);
+    let mut app = App::new();
+    app.rebuild_grid(w, h);
+    for _ in 0..220 {
+        app.step(0.05); // let the rain reach a full-screen steady state
+    }
+    let mut buf = vec![0u32; w * h];
+    paint_frame(&mut buf, w, h, &app.glyphs, &app.columns, app.cell_w, app.cell_h, app.rows);
+
+    let mut rgb = Vec::with_capacity(w * h * 3);
+    for px in &buf {
+        rgb.push((px >> 16) as u8);
+        rgb.push((px >> 8) as u8);
+        rgb.push(*px as u8);
+    }
+    let file = std::fs::File::create(path).expect("create png file");
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w as u32, h as u32);
+    enc.set_color(png::ColorType::Rgb);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.write_header()
+        .expect("png header")
+        .write_image_data(&rgb)
+        .expect("png data");
+    println!("wrote {path} ({w}x{h})");
+}
+
 fn main() {
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "-h" | "--help" => {
+                print!("{HELP}");
+                return;
+            }
+            "-V" | "--version" => {
+                println!("wlmatrix {}", env!("CARGO_PKG_VERSION"));
+                return;
+            }
+            "--shot" => {
+                let path = args.next().unwrap_or_else(|| {
+                    eprintln!("--shot requires a file path");
+                    std::process::exit(2);
+                });
+                render_shot(&path);
+                return;
+            }
+            other => {
+                eprintln!("wlmatrix: unknown argument '{other}'. Try --help.");
+                std::process::exit(2);
+            }
+        }
+    }
+
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App::new();
