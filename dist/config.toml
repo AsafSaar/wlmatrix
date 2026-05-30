@@ -29,6 +29,11 @@ depth = 1
 # ghost on plain rain; the default reads against the heavier "neo" look too.
 mask_intensity = 0.85
 
+# Negative-space contrast, 0..1 (default 0 = off). When > 0, the rain OUTSIDE
+# the figure is dimmed so the silhouette reads as true figure-ground — the
+# classic "operator view". Try ~0.4–0.6 for a dramatic hidden image.
+mask_contrast = 0.0
+
 # Animation frame rate.
 fps = 30
 

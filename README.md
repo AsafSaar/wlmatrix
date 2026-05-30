@@ -73,6 +73,16 @@ still. Tune `mask_intensity` (0–1, default `0.85`) for how strongly it reads �
 lower it toward `0.5` for a subtler ghost on plain rain, or keep it high so it
 survives the brighter **neo** look (bloom + depth raise the brightness floor).
 
+For the **full operator-view drama**, add `mask_contrast` (0–1): it dims the rain
+*outside* the figure so the silhouette reads as true figure-ground rather than
+just brighter glyphs. `0.4`–`0.6` is a good range.
+
+```bash
+wlmatrix --mask docs/operator-mask.png --mask-contrast 0.6
+```
+
+![hidden image with negative-space contrast](docs/mask-contrast.gif)
+
 ---
 
 ## Architecture
@@ -190,6 +200,7 @@ charset    = "ascii"    # ascii|alnum|binary|digits|katakana|"<literal>"
 # mask     = "/path/to/pic.png"   # hide an image in the rain (luminance × alpha)
 # mask_text = "WAKE UP"           # ...or a line of text (used if `mask` unset)
 mask_intensity = 0.85   # how strongly the hidden image glows, 0–1
+mask_contrast  = 0.0    # dim rain outside the figure (0 = off; try 0.4–0.6)
 # font     = "/path/to/Mono.ttf"   # optional; else a system mono is found
 ```
 
@@ -207,6 +218,7 @@ mask_intensity = 0.85   # how strongly the hidden image glows, 0–1
 | `mask` | *(none)* | PNG hidden in the rain; any size/format, luminance × alpha |
 | `mask_text` | *(none)* | text hidden in the rain (used only if `mask` is unset) |
 | `mask_intensity` | `0.85` | 0–1; how strongly the hidden image glows (lower ≈ subtler) |
+| `mask_contrast` | `0.0` | 0–1; dim rain outside the figure for figure-ground (0 = off) |
 | `font` | *(auto)* | force a specific `.ttf`/`.ttc` |
 
 ### CLI overrides

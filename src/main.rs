@@ -56,6 +56,7 @@ struct Config {
     mask: Option<String>,      // path to a grayscale/any PNG used as a luminance mask
     mask_text: Option<String>, // text rendered into a mask (used if `mask` is unset)
     mask_intensity: f32,       // 0..1, how strongly the ghost glows under the rain
+    mask_contrast: f32,        // 0..1, how much the rain OUTSIDE the figure is dimmed
 }
 
 impl Default for Config {
@@ -76,6 +77,7 @@ impl Default for Config {
             // 0.85: visible against the heavier "neo" look (bloom + depth + dense
             // katakana all raise the brightness floor); still reads as a ghost.
             mask_intensity: 0.85,
+            mask_contrast: 0.0, // opt-in; 0 = pure additive ghost (no negative-space dimming)
         }
     }
 }
@@ -186,6 +188,11 @@ fn apply_key(cfg: &mut Config, key: &str, val: &str) {
         "mask_intensity" | "mask-intensity" => {
             if let Ok(v) = val.parse::<f32>() {
                 cfg.mask_intensity = v.clamp(0.0, 1.0);
+            }
+        }
+        "mask_contrast" | "mask-contrast" => {
+            if let Ok(v) = val.parse::<f32>() {
+                cfg.mask_contrast = v.clamp(0.0, 1.0);
             }
         }
         "idle_ms" => {} // consumed by the wl-screensaver daemon, not the renderer
@@ -324,6 +331,7 @@ struct App {
     // hidden "operator view" image (None = plain rain):
     mask: Option<MaskData>,
     mask_intensity: f32,
+    mask_contrast: f32,
     ghost_weights: Vec<f32>, // per-cell mask luminance on the NEAR layer's grid
     ghost_idx: Vec<u8>,      // per-cell glyph index for the ghost (shimmer over time)
     ghost_tick: u32,
@@ -566,6 +574,7 @@ impl App {
             glow: cfg.glow,
             mask,
             mask_intensity: cfg.mask_intensity,
+            mask_contrast: cfg.mask_contrast,
             ghost_weights: Vec::new(),
             ghost_idx: Vec::new(),
             ghost_tick: 0,
@@ -696,14 +705,40 @@ impl App {
             &self.ghost_weights,
             &self.ghost_idx,
             self.mask_intensity,
+            self.mask_contrast,
         );
         let _ = buf.present();
+    }
+}
+
+/// Per-cell rain attenuation derived from the mask's negative space — the
+/// `mask_contrast` knob. Rain glyphs outside the figure are dimmed so the
+/// silhouette reads as figure-ground, not just brighter glyphs. Weights live on
+/// the near-layer grid; we sample by pixel position so it applies uniformly to
+/// every depth layer regardless of that layer's own cell size.
+struct Atten<'a> {
+    weights: &'a [f32],
+    cols: usize,
+    rows: usize,
+    cell_w: usize,
+    cell_h: usize,
+    contrast: f32,
+}
+impl Atten<'_> {
+    /// Brightness multiplier for a point at pixel (px, py): 1.0 inside the figure
+    /// (weight → 1), down to `1 - contrast` in empty space (weight → 0).
+    fn mult_at(&self, px: i32, py: i32) -> f32 {
+        let cx = (px.max(0) as usize / self.cell_w.max(1)).min(self.cols.saturating_sub(1));
+        let cy = (py.max(0) as usize / self.cell_h.max(1)).min(self.rows.saturating_sub(1));
+        let w = self.weights[cy * self.cols + cx];
+        1.0 - self.contrast * (1.0 - w)
     }
 }
 
 /// Composite all depth layers (far → near, additively) into `buf`, then bloom.
 /// If a ghost mask is present it is laid down FIRST (under the rain) so rain
 /// heads crossing bright ghost cells brighten them — the image shimmers through.
+/// With `mask_contrast > 0`, the rain outside the figure is additionally dimmed.
 #[allow(clippy::too_many_arguments)]
 fn render_layers(
     buf: &mut [u32],
@@ -716,24 +751,41 @@ fn render_layers(
     ghost_weights: &[f32],
     ghost_idx: &[u8],
     mask_intensity: f32,
+    mask_contrast: f32,
 ) {
     for px in buf.iter_mut() {
         *px = 0; // clear once; layers add on top
     }
+    // The near (front) layer owns the ghost grid; both the ghost and the
+    // negative-space attenuation are keyed off it.
+    let near = layers.last();
+    // Negative-space dimming (opt-in): only when a mask is present AND contrast > 0.
+    let atten = if mask_contrast > 0.0 && !ghost_weights.is_empty() {
+        near.map(|n| Atten {
+            weights: ghost_weights,
+            cols: n.cols,
+            rows: n.rows,
+            cell_w: n.cell_w,
+            cell_h: n.cell_h,
+            contrast: mask_contrast,
+        })
+    } else {
+        None
+    };
     // Hidden image, drawn under the rain using the near layer's glyph cache/grid.
     if !ghost_weights.is_empty() {
-        if let Some(near) = layers.last() {
+        if let Some(n) = near {
             paint_ghost(
                 buf,
                 width,
                 height,
-                &near.glyphs,
+                &n.glyphs,
                 ghost_weights,
                 ghost_idx,
-                near.cell_w,
-                near.cell_h,
-                near.cols,
-                near.rows,
+                n.cell_w,
+                n.cell_h,
+                n.cols,
+                n.rows,
                 trail,
                 mask_intensity,
             );
@@ -754,6 +806,7 @@ fn render_layers(
             layer.rows,
             dim(head, layer.brightness),
             dim(trail, layer.brightness),
+            atten.as_ref(),
         );
     }
     if glow {
@@ -775,6 +828,7 @@ fn paint_frame(
     rows: usize,
     head: (u8, u8, u8),
     trail: (u8, u8, u8),
+    atten: Option<&Atten>,
 ) {
     // additive: caller clears once, then each depth layer adds on top
     let cw = cell_w as i32;
@@ -793,19 +847,23 @@ fn paint_frame(
                 continue;
             }
             // leader uses the head color; the trail fades through the trail color
-            let (r, gr, b) = if k == 0 {
-                (head.0 as u32, head.1 as u32, head.2 as u32)
+            let (mut r, mut gr, mut b) = if k == 0 {
+                (head.0 as f32, head.1 as f32, head.2 as f32)
             } else {
                 let t = 1.0 - (k as f32 / col.len as f32);
                 let inten = (0.25 + 0.75 * t).min(1.0);
-                (
-                    (trail.0 as f32 * inten) as u32,
-                    (trail.1 as f32 * inten) as u32,
-                    (trail.2 as f32 * inten) as u32,
-                )
+                (trail.0 as f32 * inten, trail.1 as f32 * inten, trail.2 as f32 * inten)
             };
             let cell_y = y * chh;
-            blit(buf, width, height, cell_x + g.left, cell_y + g.top, g, r, gr, b);
+            // Dim rain falling through the figure's negative space, keyed on the
+            // cell center so the multiplier is stable regardless of glyph shape.
+            if let Some(a) = atten {
+                let m = a.mult_at(cell_x + cw / 2, cell_y + chh / 2);
+                r *= m;
+                gr *= m;
+                b *= m;
+            }
+            blit(buf, width, height, cell_x + g.left, cell_y + g.top, g, r as u32, gr as u32, b as u32);
         }
     }
 }
@@ -1045,6 +1103,7 @@ OPTIONS:
         --mask <FILE.png>   Hide an image in the rain (any PNG; luminance = brightness)
         --mask-text <TEXT>  Hide a line of text in the rain
         --mask-intensity <0..1>  How strongly the hidden image glows (default 0.85)
+        --mask-contrast <0..1>   Dim the rain OUTSIDE the figure so it pops (default 0)
         --shot <FILE>       Render one frame to a PNG and exit
         --gif  <FILE>       Render an animated looping GIF and exit
 
@@ -1075,7 +1134,7 @@ fn render_shot(cfg: &Config, path: &str) {
     let mut buf = vec![0u32; w * h];
     render_layers(
         &mut buf, w, h, &app.layers, app.head, app.trail, cfg.glow,
-        &app.ghost_weights, &app.ghost_idx, app.mask_intensity,
+        &app.ghost_weights, &app.ghost_idx, app.mask_intensity, app.mask_contrast,
     );
 
     let mut rgb = Vec::with_capacity(w * h * 3);
@@ -1129,7 +1188,7 @@ fn render_gif(cfg: &Config, path: &str) {
         app.step(0.05);
         render_layers(
             &mut buf, w, h, &app.layers, app.head, app.trail, cfg.glow,
-            &app.ghost_weights, &app.ghost_idx, app.mask_intensity,
+            &app.ghost_weights, &app.ghost_idx, app.mask_intensity, app.mask_contrast,
         );
         let mut indexed = vec![0u8; w * h];
         for (i, px) in buf.iter().enumerate() {
@@ -1233,6 +1292,10 @@ fn main() {
             "--mask-intensity" => {
                 let v = next_val(&args, &mut i, "--mask-intensity requires 0..1");
                 apply_key(&mut cfg, "mask_intensity", &v);
+            }
+            "--mask-contrast" => {
+                let v = next_val(&args, &mut i, "--mask-contrast requires 0..1");
+                apply_key(&mut cfg, "mask_contrast", &v);
             }
             "--shot" => action = Action::Shot(next_val(&args, &mut i, "--shot requires a file path")),
             "--gif" => action = Action::Gif(next_val(&args, &mut i, "--gif requires a file path")),
