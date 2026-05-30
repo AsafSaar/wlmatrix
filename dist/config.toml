@@ -17,6 +17,17 @@ glow = false
 # Far layers are smaller, slower and dimmer than near ones.
 depth = 1
 
+# "Operator view": hide an image or text in the rain. A PNG's luminance (or the
+# shape of the text) becomes a faint ghost under the rain that brightens as the
+# heads fall through it — it reads in motion, not as a still.
+#   mask      = a PNG path (any size/format; brightness = luminance × alpha)
+#   mask_text = a line of text (used only if `mask` is unset)
+# mask = "/path/to/picture.png"
+# mask_text = "WAKE UP"
+
+# How strongly the hidden image glows, 0..1 (subtle by default).
+mask_intensity = 0.5
+
 # Animation frame rate.
 fps = 30
 

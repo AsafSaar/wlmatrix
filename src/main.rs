@@ -52,6 +52,10 @@ struct Config {
     font_path: Option<String>,
     glow: bool,    // additive bloom on bright pixels ("neo" look)
     depth: usize,  // number of parallax rain layers (1 = flat)
+    // "operator view": a faint image/text hidden in the rain (see paint_ghost).
+    mask: Option<String>,      // path to a grayscale/any PNG used as a luminance mask
+    mask_text: Option<String>, // text rendered into a mask (used if `mask` is unset)
+    mask_intensity: f32,       // 0..1, how strongly the ghost glows under the rain
 }
 
 impl Default for Config {
@@ -67,6 +71,9 @@ impl Default for Config {
             font_path: None,
             glow: false,
             depth: 1,
+            mask: None,
+            mask_text: None,
+            mask_intensity: 0.5,
         }
     }
 }
@@ -170,6 +177,15 @@ fn apply_key(cfg: &mut Config, key: &str, val: &str) {
             "classic" | "matrix" => cfg.glow = false,
             _ => {}
         },
+        "mask" => cfg.mask = if val.is_empty() { None } else { Some(val.to_string()) },
+        "mask_text" | "mask-text" => {
+            cfg.mask_text = if val.is_empty() { None } else { Some(val.to_string()) }
+        }
+        "mask_intensity" | "mask-intensity" => {
+            if let Ok(v) = val.parse::<f32>() {
+                cfg.mask_intensity = v.clamp(0.0, 1.0);
+            }
+        }
         "idle_ms" => {} // consumed by the wl-screensaver daemon, not the renderer
         _ => {}
     }
@@ -257,6 +273,14 @@ struct GlyphBmp {
     cov: Vec<u8>,
 }
 
+/// A luminance field (0..1, row-major) used as the hidden "operator view" image.
+/// Sourced from a PNG (decode_png_luminance) or rendered text (text_to_mask).
+struct MaskData {
+    lum: Vec<f32>,
+    w: usize,
+    h: usize,
+}
+
 struct Column {
     head: f32,
     speed: f32, // rows per second
@@ -295,6 +319,12 @@ struct App {
     head: (u8, u8, u8),
     trail: (u8, u8, u8),
     glow: bool,
+    // hidden "operator view" image (None = plain rain):
+    mask: Option<MaskData>,
+    mask_intensity: f32,
+    ghost_weights: Vec<f32>, // per-cell mask luminance on the NEAR layer's grid
+    ghost_idx: Vec<u8>,      // per-cell glyph index for the ghost (shimmer over time)
+    ghost_tick: u32,
 }
 
 /// Rasterize the charset's glyphs at `font_px`; returns (glyphs, cell_w, cell_h).
@@ -372,6 +402,114 @@ fn load_font(charset: &str, font_path: &Option<String>) -> (FontVec, bool) {
     (fallback.expect("no usable font found on this system"), false)
 }
 
+/// Decode any PNG into a luminance mask (0..1). Palette/low-bit-depth images are
+/// expanded and 16-bit is stripped to 8-bit, so we always see 1–4 u8 samples per
+/// pixel. Luminance = Rec.601 weights, premultiplied by alpha (transparent → 0).
+fn decode_png_luminance(path: &str) -> Option<MaskData> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut decoder = png::Decoder::new(std::io::BufReader::new(file));
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).ok()?;
+    let (w, h) = (info.width as usize, info.height as usize);
+    let samples = info.color_type.samples(); // 1=gray 2=gray+a 3=rgb 4=rgba
+    let data = &buf[..info.buffer_size()];
+    let lum601 = |r: u8, g: u8, b: u8| 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
+    let mut lum = vec![0f32; w * h];
+    for (i, out) in lum.iter_mut().enumerate() {
+        let p = i * samples;
+        let (l, a) = match samples {
+            1 => (data[p] as f32, 255.0),
+            2 => (data[p] as f32, data[p + 1] as f32),
+            3 => (lum601(data[p], data[p + 1], data[p + 2]), 255.0),
+            _ => (lum601(data[p], data[p + 1], data[p + 2]), data[p + 3] as f32),
+        };
+        *out = (l / 255.0) * (a / 255.0);
+    }
+    Some(MaskData { lum, w, h })
+}
+
+/// Rasterize a line of text into a luminance mask (white-on-black) at ~120px,
+/// so it can be hidden in the rain. Uses glyph coverage as luminance.
+fn text_to_mask(text: &str, font: &FontVec) -> Option<MaskData> {
+    let px = 120.0_f32;
+    let scaled = font.as_scaled(px);
+    let ascent = scaled.ascent();
+    let height = (scaled.ascent() - scaled.descent()).ceil().max(1.0) as usize;
+    let total_w: f32 = text.chars().map(|c| scaled.h_advance(font.glyph_id(c))).sum();
+    let pad = 8usize;
+    let w = total_w.ceil().max(1.0) as usize + pad * 2;
+    let h = height + pad * 2;
+    let mut lum = vec![0f32; w * h];
+    let mut pen_x = pad as f32;
+    for ch in text.chars() {
+        let gid = font.glyph_id(ch);
+        let glyph = gid.with_scale_and_position(px, Point { x: pen_x, y: 0.0 });
+        if let Some(outline) = font.outline_glyph(glyph) {
+            let b = outline.px_bounds();
+            let base_x = b.min.x.round() as i32;
+            let base_y = (ascent + b.min.y).round() as i32 + pad as i32;
+            outline.draw(|gx, gy, c| {
+                let xx = base_x + gx as i32;
+                let yy = base_y + gy as i32;
+                if xx >= 0 && (xx as usize) < w && yy >= 0 && (yy as usize) < h {
+                    let idx = yy as usize * w + xx as usize;
+                    if c > lum[idx] {
+                        lum[idx] = c; // max coverage (glyphs shouldn't overlap, but be safe)
+                    }
+                }
+            });
+        }
+        pen_x += scaled.h_advance(gid);
+    }
+    Some(MaskData { lum, w, h })
+}
+
+/// Resolve the configured hidden image: a PNG path takes precedence, else text.
+/// `font` is the already-loaded rain font (reused so text masks need no 2nd load).
+fn load_mask(cfg: &Config, font: &FontVec) -> Option<MaskData> {
+    if let Some(p) = &cfg.mask {
+        match decode_png_luminance(p) {
+            Some(m) => return Some(m),
+            None => eprintln!("wlmatrix: could not read mask PNG '{p}' — ignoring"),
+        }
+    }
+    match &cfg.mask_text {
+        Some(t) if !t.is_empty() => text_to_mask(t, font),
+        _ => None,
+    }
+}
+
+/// Map a mask (any size) onto a `cols`×`rows` glyph grid, fit-contain & centered,
+/// sampling luminance at each cell's center. Cells outside the image read 0.
+fn compute_ghost(mask: &MaskData, cols: usize, rows: usize, cell_w: usize, cell_h: usize) -> Vec<f32> {
+    let mut out = vec![0f32; cols * rows];
+    if mask.w == 0 || mask.h == 0 || cols == 0 || rows == 0 {
+        return out;
+    }
+    let screen_w = (cols * cell_w) as f32;
+    let screen_h = (rows * cell_h) as f32;
+    // fit-contain: scale the image to fit inside the screen, preserving aspect
+    let scale = (screen_w / mask.w as f32).min(screen_h / mask.h as f32);
+    let off_x = (screen_w - mask.w as f32 * scale) * 0.5;
+    let off_y = (screen_h - mask.h as f32 * scale) * 0.5;
+    for cy in 0..rows {
+        let my = ((cy as f32 + 0.5) * cell_h as f32 - off_y) / scale;
+        if my < 0.0 || my >= mask.h as f32 {
+            continue;
+        }
+        for cx in 0..cols {
+            let mx = ((cx as f32 + 0.5) * cell_w as f32 - off_x) / scale;
+            if mx < 0.0 || mx >= mask.w as f32 {
+                continue;
+            }
+            out[cy * cols + cx] = mask.lum[my as usize * mask.w + mx as usize];
+        }
+    }
+    out
+}
+
 impl App {
     fn new(cfg: &Config) -> App {
         let needs_cjk = cfg.charset.chars().any(|c| c as u32 > 0x2FF);
@@ -405,6 +543,10 @@ impl App {
             });
         }
 
+        // Build the hidden-image mask now, while the rain `font` is still in scope
+        // (text masks reuse it). `ghost_*` grids are sized in rebuild_grid.
+        let mask = load_mask(cfg, &font);
+
         App {
             window: None,
             surface: None,
@@ -420,6 +562,11 @@ impl App {
             head: cfg.head,
             trail: cfg.trail,
             glow: cfg.glow,
+            mask,
+            mask_intensity: cfg.mask_intensity,
+            ghost_weights: Vec::new(),
+            ghost_idx: Vec::new(),
+            ghost_tick: 0,
         }
     }
 
@@ -447,6 +594,24 @@ impl App {
             layer.cols = cols;
             layer.rows = rows;
             layer.columns = columns;
+        }
+        // Size the ghost to the NEAR (front) layer's grid. Extract its scalars
+        // into a value before touching self.rng (disjoint-borrow dance).
+        let ghost = self.mask.as_ref().and_then(|mask| {
+            self.layers.last().map(|near| {
+                (
+                    compute_ghost(mask, near.cols, near.rows, near.cell_w, near.cell_h),
+                    near.glyphs.len() as u32,
+                )
+            })
+        });
+        if let Some((weights, nglyphs)) = ghost {
+            let mut idx = vec![0u8; weights.len()];
+            for v in idx.iter_mut() {
+                *v = self.rng.below(nglyphs) as u8;
+            }
+            self.ghost_weights = weights;
+            self.ghost_idx = idx;
         }
         self.inited_grid = true;
     }
@@ -481,6 +646,19 @@ impl App {
                 }
             }
         }
+        // Subtle shimmer: every ~6 frames, re-roll ~5% of the ghost glyphs so the
+        // hidden image flickers like the rest of the rain rather than sitting still.
+        if !self.ghost_idx.is_empty() {
+            self.ghost_tick = self.ghost_tick.wrapping_add(1);
+            if self.ghost_tick % 6 == 0 {
+                let nglyphs = self.layers.last().map(|l| l.glyphs.len() as u32).unwrap_or(1);
+                let n = (self.ghost_idx.len() / 20).max(1);
+                for _ in 0..n {
+                    let pos = self.rng.below(self.ghost_idx.len() as u32) as usize;
+                    self.ghost_idx[pos] = self.rng.below(nglyphs) as u8;
+                }
+            }
+        }
     }
 
     fn render(&mut self) {
@@ -505,12 +683,26 @@ impl App {
             Ok(b) => b,
             Err(_) => return,
         };
-        render_layers(&mut buf, width, height, &self.layers, self.head, self.trail, self.glow);
+        render_layers(
+            &mut buf,
+            width,
+            height,
+            &self.layers,
+            self.head,
+            self.trail,
+            self.glow,
+            &self.ghost_weights,
+            &self.ghost_idx,
+            self.mask_intensity,
+        );
         let _ = buf.present();
     }
 }
 
 /// Composite all depth layers (far → near, additively) into `buf`, then bloom.
+/// If a ghost mask is present it is laid down FIRST (under the rain) so rain
+/// heads crossing bright ghost cells brighten them — the image shimmers through.
+#[allow(clippy::too_many_arguments)]
 fn render_layers(
     buf: &mut [u32],
     width: usize,
@@ -519,9 +711,31 @@ fn render_layers(
     head: (u8, u8, u8),
     trail: (u8, u8, u8),
     glow: bool,
+    ghost_weights: &[f32],
+    ghost_idx: &[u8],
+    mask_intensity: f32,
 ) {
     for px in buf.iter_mut() {
         *px = 0; // clear once; layers add on top
+    }
+    // Hidden image, drawn under the rain using the near layer's glyph cache/grid.
+    if !ghost_weights.is_empty() {
+        if let Some(near) = layers.last() {
+            paint_ghost(
+                buf,
+                width,
+                height,
+                &near.glyphs,
+                ghost_weights,
+                ghost_idx,
+                near.cell_w,
+                near.cell_h,
+                near.cols,
+                near.rows,
+                trail,
+                mask_intensity,
+            );
+        }
     }
     let dim = |c: (u8, u8, u8), b: f32| {
         ((c.0 as f32 * b) as u8, (c.1 as f32 * b) as u8, (c.2 as f32 * b) as u8)
@@ -590,6 +804,52 @@ fn paint_frame(
             };
             let cell_y = y * chh;
             blit(buf, width, height, cell_x + g.left, cell_y + g.top, g, r, gr, b);
+        }
+    }
+}
+
+/// Paint the hidden "operator view" image: a faint glyph in every grid cell whose
+/// mask luminance is non-trivial, at brightness `weight * intensity` in the trail
+/// color. Because `blit` is additive, the bright rain heads that fall across these
+/// cells light them up — so the image surfaces in motion, not as a static picture.
+#[allow(clippy::too_many_arguments)]
+fn paint_ghost(
+    buf: &mut [u32],
+    width: usize,
+    height: usize,
+    glyphs: &[GlyphBmp],
+    weights: &[f32],
+    idx: &[u8],
+    cell_w: usize,
+    cell_h: usize,
+    cols: usize,
+    rows: usize,
+    trail: (u8, u8, u8),
+    intensity: f32,
+) {
+    let cw = cell_w as i32;
+    let chh = cell_h as i32;
+    for cy in 0..rows {
+        for cx in 0..cols {
+            let cell = cy * cols + cx;
+            let w = weights[cell];
+            if w <= 0.06 {
+                continue; // below the noise floor — leave it to the rain
+            }
+            let inten = w * intensity;
+            let (r, g, b) = (
+                (trail.0 as f32 * inten) as u32,
+                (trail.1 as f32 * inten) as u32,
+                (trail.2 as f32 * inten) as u32,
+            );
+            if r == 0 && g == 0 && b == 0 {
+                continue;
+            }
+            let glyph = &glyphs[idx[cell] as usize];
+            if glyph.cov.is_empty() {
+                continue;
+            }
+            blit(buf, width, height, cx as i32 * cw + glyph.left, cy as i32 * chh + glyph.top, glyph, r, g, b);
         }
     }
 }
@@ -780,6 +1040,9 @@ OPTIONS:
         --style <S>         classic | neo  (neo = bloom + katakana)
         --glow / --no-glow  Toggle additive bloom
         --depth <1-4>       Parallax rain layers (1 = flat, 3 = deep)
+        --mask <FILE.png>   Hide an image in the rain (any PNG; luminance = brightness)
+        --mask-text <TEXT>  Hide a line of text in the rain
+        --mask-intensity <0..1>  How strongly the hidden image glows (default 0.5)
         --shot <FILE>       Render one frame to a PNG and exit
         --gif  <FILE>       Render an animated looping GIF and exit
 
@@ -808,7 +1071,10 @@ fn render_shot(cfg: &Config, path: &str) {
         app.step(0.05);
     }
     let mut buf = vec![0u32; w * h];
-    render_layers(&mut buf, w, h, &app.layers, app.head, app.trail, cfg.glow);
+    render_layers(
+        &mut buf, w, h, &app.layers, app.head, app.trail, cfg.glow,
+        &app.ghost_weights, &app.ghost_idx, app.mask_intensity,
+    );
 
     let mut rgb = Vec::with_capacity(w * h * 3);
     for px in &buf {
@@ -859,7 +1125,10 @@ fn render_gif(cfg: &Config, path: &str) {
     let mut buf = vec![0u32; w * h];
     for _ in 0..frames {
         app.step(0.05);
-        render_layers(&mut buf, w, h, &app.layers, app.head, app.trail, cfg.glow);
+        render_layers(
+            &mut buf, w, h, &app.layers, app.head, app.trail, cfg.glow,
+            &app.ghost_weights, &app.ghost_idx, app.mask_intensity,
+        );
         let mut indexed = vec![0u8; w * h];
         for (i, px) in buf.iter().enumerate() {
             let r = (px >> 16) & 0xFF;
@@ -950,6 +1219,18 @@ fn main() {
             "--depth" => {
                 let v = next_val(&args, &mut i, "--depth requires 1-4");
                 apply_key(&mut cfg, "depth", &v);
+            }
+            "--mask" => {
+                let v = next_val(&args, &mut i, "--mask requires a PNG path");
+                apply_key(&mut cfg, "mask", &v);
+            }
+            "--mask-text" => {
+                let v = next_val(&args, &mut i, "--mask-text requires text");
+                apply_key(&mut cfg, "mask_text", &v);
+            }
+            "--mask-intensity" => {
+                let v = next_val(&args, &mut i, "--mask-intensity requires 0..1");
+                apply_key(&mut cfg, "mask_intensity", &v);
             }
             "--shot" => action = Action::Shot(next_val(&args, &mut i, "--shot requires a file path")),
             "--gif" => action = Action::Gif(next_val(&args, &mut i, "--gif requires a file path")),

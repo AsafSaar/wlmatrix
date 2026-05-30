@@ -53,6 +53,24 @@ wlmatrix --style neo --depth 3
 
 ![depth/parallax — neo + 3 layers](docs/depth.gif)
 
+### Hidden images ("operator view")
+
+Hide a picture or a word **in** the rain — the Matrix "operator view", where a
+face or message condenses out of the green flow. Point `mask` at any PNG (its
+luminance × alpha becomes the image) or set `mask_text` to a line of text:
+
+```bash
+wlmatrix --mask docs/operator-mask.png      # any PNG
+wlmatrix --mask-text "WAKE UP"              # or a line of text
+```
+
+![hidden image in the rain — operator view](docs/mask.gif)
+
+The image is laid down as faint glyphs *under* the rain; because compositing is
+additive, the bright heads brighten the masked cells as they fall through, so
+the picture **shimmers into view in motion** rather than sitting there as a
+still. Tune `mask_intensity` (0–1, default `0.5`) for how strongly it reads.
+
 ---
 
 ## Architecture
@@ -167,6 +185,9 @@ speed_min  = 6          # fall-speed range, rows/sec
 speed_max  = 24
 color      = "green"    # green|amber|cyan|red|purple|white|"#RRGGBB"
 charset    = "ascii"    # ascii|alnum|binary|digits|katakana|"<literal>"
+# mask     = "/path/to/pic.png"   # hide an image in the rain (luminance × alpha)
+# mask_text = "WAKE UP"           # ...or a line of text (used if `mask` unset)
+mask_intensity = 0.5    # how strongly the hidden image glows, 0–1
 # font     = "/path/to/Mono.ttf"   # optional; else a system mono is found
 ```
 
@@ -181,6 +202,9 @@ charset    = "ascii"    # ascii|alnum|binary|digits|katakana|"<literal>"
 | `speed_min` / `speed_max` | `6` / `24` | rows per second |
 | `color` | `green` | preset name or `#RRGGBB` |
 | `charset` | `ascii` | preset or literal; `katakana` auto-loads a CJK font |
+| `mask` | *(none)* | PNG hidden in the rain; any size/format, luminance × alpha |
+| `mask_text` | *(none)* | text hidden in the rain (used only if `mask` is unset) |
+| `mask_intensity` | `0.5` | 0–1; how strongly the hidden image glows |
 | `font` | *(auto)* | force a specific `.ttf`/`.ttc` |
 
 ### CLI overrides
