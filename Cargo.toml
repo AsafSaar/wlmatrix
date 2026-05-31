@@ -1,6 +1,6 @@
 [package]
 name = "wlmatrix"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2021"
 description = "CPU-rendered Matrix-rain screensaver (no GPU); native on Linux Wayland/X11, also builds on macOS and Windows"
 authors = ["Asaf Saar"]
@@ -18,6 +18,10 @@ png = "0.17"   # only used by `--shot` (render a frame to PNG)
 gif = "0.13"   # only used by `--gif` (render an animated GIF)
 fontdb = "0.18"  # cross-platform system-font discovery (no hardcoded paths)
 dirs = "5"       # per-OS config directory
+
+# Windows-only: screensaver (.scr) /c configure dialog + /p preview sizing.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
 [profile.release]
 opt-level = 3

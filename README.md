@@ -147,14 +147,14 @@ attach `wlmatrix-x86_64-linux`, `wlmatrix-aarch64-macos`,
 | | Renders the rain | Exits on input | Auto-launch on idle |
 |---|---|---|---|
 | **Linux** (Wayland/X11) | ✅ | ✅ | ✅ `wl-screensaver` daemon + systemd |
-| **macOS** | ✅ | ✅ | ⏳ not yet — run it as an app |
-| **Windows** | ✅ | ✅ | ⏳ not yet — run it as an app |
+| **Windows** | ✅ | ✅ | ✅ `wlmatrix.scr` — a real screensaver |
+| **macOS** | ✅ | ✅ | ⏳ not yet — run the app manually |
 
-So on macOS/Windows today wlmatrix runs as a **fullscreen app that exits on any
-input** (great as a manual "blank the screen" toy or via your own hotkey/idle
-launcher). What's *not* done yet is first-class OS screensaver integration —
-a Windows `.scr` (`/s`/`/c`/`/p` handling) and a macOS `.saver` bundle or
-`launchd` idle agent. Contributions welcome.
+On **Windows** it's a proper screensaver: the same binary, renamed to
+`wlmatrix.scr`, handles `/s` (run), `/c` (settings) and `/p` (the Settings-dialog
+preview), and Windows launches it on idle — see [below](#windows-installing-the-screensaver).
+On **macOS** it runs as a fullscreen app for now; first-class integration (a
+`.saver` bundle or a `launchd` idle agent) is the remaining piece.
 
 ### macOS: the `.app` and the Gatekeeper warning
 
@@ -187,7 +187,26 @@ then `chmod +x`).
 > (Info.plist + `.icns` icon) in CI; run it on a Mac to build the `.app` locally.
 
 > **Windows** may likewise show a SmartScreen warning ("Windows protected your
-> PC") for the unsigned `.exe` — click **More info → Run anyway**.
+> PC") for the unsigned `.exe`/`.scr` — click **More info → Run anyway**.
+
+### Windows: installing the screensaver
+
+Download **`wlmatrix.scr`** from the [latest release](https://github.com/AsafSaar/wlmatrix/releases/latest), then either:
+
+- **Right-click `wlmatrix.scr` → Install.** This opens the Screen Saver settings
+  with wlmatrix selected — set the idle wait time and click OK. (To keep it
+  permanently, first copy `wlmatrix.scr` into `C:\Windows\System32\`, or just run
+  it from wherever it lives.)
+- Or right-click → **Test** to preview it fullscreen immediately.
+
+Once selected, Windows launches it automatically on idle and dismisses it on any
+input — no background daemon needed (the OS does the idle timing). The
+**Settings** button shows where the `config.toml` lives (wlmatrix is configured
+by that file, same keys as every other platform). `wlmatrix.exe` is also
+attached if you just want to run it from a terminal.
+
+> Like the macOS app, the `.scr` isn't code-signed yet, so SmartScreen warns on
+> first run — **More info → Run anyway**.
 
 ---
 

@@ -48,6 +48,13 @@ jobs:
           cp "target/release/wlmatrix${{ matrix.ext }}" \
              "dist-bin/wlmatrix-${{ matrix.target }}${{ matrix.ext }}"
 
+      # Windows: a screensaver is just the .exe renamed to .scr. Ship one so
+      # users can right-click -> Install.
+      - name: Stage .scr (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: cp "target/release/wlmatrix.exe" "dist-bin/wlmatrix.scr"
+
       # macOS: also assemble a double-clickable wlmatrix.app (icon + Info.plist)
       # and zip it with ditto (preserves the bundle layout + exec bits).
       - name: Build .app bundle (macOS)

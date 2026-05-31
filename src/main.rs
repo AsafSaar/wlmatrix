@@ -338,6 +338,12 @@ struct App {
     ghost_weights: Vec<f32>, // per-cell mask luminance on the NEAR layer's grid
     ghost_idx: Vec<u8>,      // per-cell glyph index for the ghost (shimmer over time)
     ghost_tick: u32,
+    // Windows .scr preview: when set, build a child window inside this parent HWND
+    // (the Settings dialog's monitor thumbnail) instead of going fullscreen.
+    #[cfg(windows)]
+    parent_hwnd: Option<isize>,
+    #[cfg(windows)]
+    preview_size: (u32, u32),
 }
 
 /// Rasterize the charset's glyphs at `font_px`; returns (glyphs, cell_w, cell_h).
@@ -624,7 +630,53 @@ impl App {
             ghost_weights: Vec::new(),
             ghost_idx: Vec::new(),
             ghost_tick: 0,
+            #[cfg(windows)]
+            parent_hwnd: None,
+            #[cfg(windows)]
+            preview_size: (0, 0),
         }
+    }
+
+    /// Configure this App to render into the Windows screensaver preview pane
+    /// (a child of `hwnd`, sized to `w`×`h`) instead of going fullscreen.
+    #[cfg(windows)]
+    fn into_preview(mut self, hwnd: isize, w: u32, h: u32) -> App {
+        self.parent_hwnd = Some(hwnd);
+        self.preview_size = (w.max(1), h.max(1));
+        self
+    }
+
+    /// True while rendering the small Settings-dialog preview (don't exit on input).
+    fn is_preview(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.parent_hwnd.is_some()
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
+    /// Window attributes: fullscreen borderless normally, or — on Windows in
+    /// screensaver-preview mode — a child window embedded in the Settings dialog's
+    /// monitor thumbnail (`WS_CHILD`, confined to the parent's client area).
+    fn window_attributes(&self) -> winit::window::WindowAttributes {
+        let base = Window::default_attributes().with_title("wlmatrix");
+        #[cfg(windows)]
+        if let Some(hwnd) = self.parent_hwnd {
+            use std::num::NonZeroIsize;
+            use winit::raw_window_handle::{RawWindowHandle, Win32WindowHandle};
+            if let Some(nz) = NonZeroIsize::new(hwnd) {
+                let raw = RawWindowHandle::Win32(Win32WindowHandle::new(nz));
+                let (w, h) = self.preview_size;
+                // SAFETY: `hwnd` is the preview parent handed to us by Windows on
+                // the `/p <hwnd>` command line and is valid for this run.
+                return unsafe { base.with_parent_window(Some(raw)) }
+                    .with_inner_size(winit::dpi::PhysicalSize::new(w, h));
+            }
+        }
+        base.with_fullscreen(Some(Fullscreen::Borderless(None)))
     }
 
     fn rebuild_grid(&mut self, width: usize, height: usize) {
@@ -1062,9 +1114,7 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
-        let attrs = Window::default_attributes()
-            .with_title("wlmatrix")
-            .with_fullscreen(Some(Fullscreen::Borderless(None)));
+        let attrs = self.window_attributes();
         let window = Rc::new(event_loop.create_window(attrs).expect("create_window"));
         let context = softbuffer::Context::new(window.clone()).expect("sb context");
         let surface = softbuffer::Surface::new(&context, window.clone()).expect("sb surface");
@@ -1081,9 +1131,11 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         // Ignore input for the first moments so a spurious startup CursorMoved
         // (emitted when the fullscreen surface maps) doesn't exit immediately.
-        let armed = self.start.elapsed() > Duration::from_millis(700);
+        // In the Settings-dialog preview we must NOT exit on input — the dialog
+        // owns the mouse/keyboard; we just animate until our window is destroyed.
+        let armed = !self.is_preview() && self.start.elapsed() > Duration::from_millis(700);
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested | WindowEvent::Destroyed => event_loop.exit(),
             WindowEvent::CursorMoved { .. }
             | WindowEvent::MouseInput { .. }
             | WindowEvent::MouseWheel { .. } => {
@@ -1157,6 +1209,9 @@ Settings load from wlmatrix/config.toml in your OS config dir (~/.config on
 Linux, ~/Library/Application Support on macOS, %APPDATA% on Windows); CLI flags
 override the file. With no options it runs fullscreen and exits on any input
 (on Linux, normally launched on idle by the wl-screensaver daemon).
+
+On Windows, rename the binary to wlmatrix.scr to install it as a screensaver
+(it handles the /s, /c and /p flags Windows passes; the OS does the idle timing).
 ";
 
 fn die(msg: &str) -> ! {
@@ -1270,6 +1325,15 @@ enum Action {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
+    // Windows screensaver (.scr) entry points: when installed as a screensaver,
+    // Windows launches us with /s (run), /c (configure) or /p <hwnd> (preview).
+    // These take precedence over the normal CLI; absent them, fall through.
+    #[cfg(windows)]
+    if let Some(mode) = win_scr::parse_mode(&args) {
+        win_scr::run(mode);
+        return;
+    }
+
     // Load the config file first (CLI --config overrides the default path).
     let cfg_path = args
         .iter()
@@ -1354,11 +1418,132 @@ fn main() {
     match action {
         Action::Shot(p) => render_shot(&cfg, &p),
         Action::Gif(p) => render_gif(&cfg, &p),
-        Action::Run => {
-            let event_loop = EventLoop::new().expect("event loop");
-            event_loop.set_control_flow(ControlFlow::Poll);
-            let mut app = App::new(&cfg);
-            let _ = event_loop.run_app(&mut app);
+        Action::Run => run_fullscreen(&cfg),
+    }
+}
+
+/// Run the screensaver fullscreen until any input dismisses it.
+fn run_fullscreen(cfg: &Config) {
+    let event_loop = EventLoop::new().expect("event loop");
+    event_loop.set_control_flow(ControlFlow::Poll);
+    let mut app = App::new(cfg);
+    let _ = event_loop.run_app(&mut app);
+}
+
+/// Windows screensaver (`.scr`) command-line handling. When wlmatrix is renamed
+/// to `wlmatrix.scr` and installed, Windows launches it with `/s` (run), `/c`
+/// (configure), or `/p <hwnd>` (preview in the Settings dialog). The OS owns
+/// idle-launching, so there's no daemon — unlike the Linux setup in `dist/`.
+/// Ref: <https://learn.microsoft.com/windows/win32/winmsg/screen-saver-library>
+#[cfg(windows)]
+mod win_scr {
+    use super::{default_config_path, parse_config_text, run_fullscreen, App, Config};
+    use winit::event_loop::{ControlFlow, EventLoop};
+
+    pub enum Mode {
+        Run,
+        Configure,
+        Preview(isize),
+    }
+
+    /// Detect a screensaver flag in `args`. Forms seen in the wild:
+    ///   `/s`              run full-screen
+    ///   `/c`  `/c:<hwnd>` configure (any hwnd is the Settings dialog; we ignore it)
+    ///   `/p <hwnd>`  `/p:<hwnd>`  preview into a child of `<hwnd>`
+    /// Flags are case-insensitive and may use `-` instead of `/`. Returns `None`
+    /// when no screensaver flag is present (i.e. a normal CLI invocation).
+    pub fn parse_mode(args: &[String]) -> Option<Mode> {
+        for (i, a) in args.iter().enumerate() {
+            let a = a.trim();
+            let Some(rest) = a.strip_prefix('/').or_else(|| a.strip_prefix('-')) else {
+                continue;
+            };
+            let (flag, inline) = match rest.split_once(':') {
+                Some((f, v)) => (f, Some(v)),
+                None => (rest, None),
+            };
+            match flag.to_ascii_lowercase().as_str() {
+                "s" => return Some(Mode::Run),
+                "c" => return Some(Mode::Configure),
+                "p" => {
+                    // hwnd is either inline (`/p:123`) or the next arg (`/p 123`)
+                    let hwnd = inline
+                        .map(str::to_string)
+                        .or_else(|| args.get(i + 1).cloned())
+                        .and_then(|s| s.trim().parse::<isize>().ok());
+                    return hwnd.map(Mode::Preview);
+                }
+                _ => {}
+            }
         }
+        None
+    }
+
+    pub fn run(mode: Mode) {
+        let cfg = load_cfg();
+        match mode {
+            Mode::Run => run_fullscreen(&cfg),
+            Mode::Configure => configure(),
+            Mode::Preview(hwnd) => preview(&cfg, hwnd),
+        }
+    }
+
+    /// The screensaver host passes no `--flags`, so config comes only from the file.
+    fn load_cfg() -> Config {
+        let mut cfg = Config::default();
+        if let Some(p) = default_config_path() {
+            if let Ok(text) = std::fs::read_to_string(p) {
+                parse_config_text(&text, &mut cfg);
+            }
+        }
+        cfg
+    }
+
+    /// wlmatrix has no GUI settings — it's configured via a TOML file — so the
+    /// "Settings" button just points the user at that file.
+    fn configure() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONINFORMATION, MB_OK};
+        let path = default_config_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "%APPDATA%\\wlmatrix\\config.toml".to_string());
+        let body = wide(&format!(
+            "wlmatrix is configured with a text file:\n\n{path}\n\n\
+             Create or edit it to change color, style (classic/neo), depth, \
+             charset, and the hidden-image mask. See the project README for all \
+             keys. Changes take effect the next time the screensaver runs."
+        ));
+        let title = wide("wlmatrix");
+        // SAFETY: NUL-terminated UTF-16 strings; a null owner window is allowed.
+        unsafe {
+            MessageBoxW(std::ptr::null_mut(), body.as_ptr(), title.as_ptr(), MB_OK | MB_ICONINFORMATION);
+        }
+    }
+
+    /// Animate inside the Settings dialog's monitor thumbnail (a child of `hwnd`).
+    fn preview(cfg: &Config, hwnd: isize) {
+        let (w, h) = client_size(hwnd);
+        let event_loop = EventLoop::new().expect("event loop");
+        event_loop.set_control_flow(ControlFlow::Poll);
+        let mut app = App::new(cfg).into_preview(hwnd, w, h);
+        let _ = event_loop.run_app(&mut app);
+    }
+
+    /// Client-area size of the preview parent (small fallback if the call fails).
+    fn client_size(hwnd: isize) -> (u32, u32) {
+        use windows_sys::Win32::Foundation::RECT;
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect;
+        let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        // SAFETY: `hwnd` is the preview parent passed on the `/p` command line.
+        let ok = unsafe { GetClientRect(hwnd as _, &mut r) };
+        if ok != 0 {
+            ((r.right - r.left).max(1) as u32, (r.bottom - r.top).max(1) as u32)
+        } else {
+            (200, 150)
+        }
+    }
+
+    /// UTF-16, NUL-terminated, for the `*W` Win32 APIs.
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 }
