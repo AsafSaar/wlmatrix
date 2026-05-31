@@ -60,11 +60,14 @@ face or message condenses out of the green flow. Point `mask` at any PNG (its
 luminance × alpha becomes the image) or set `mask_text` to a line of text:
 
 ```bash
-wlmatrix --mask docs/operator-mask.png      # any PNG
-wlmatrix --mask-text "WAKE UP"              # or a line of text
+wlmatrix --mask docs/operator-mask.png --mask-contrast 0.6   # any PNG
+wlmatrix --mask-text "WAKE UP"                               # or a line of text
 ```
 
-![hidden image in the rain — operator view](docs/mask.gif)
+![a figure condensing out of the rain — the operator view](docs/mask.gif)
+
+*(The figure above is the bundled [`docs/operator-mask.png`](docs/operator-mask.png) —
+an original silhouette; point `mask` at any PNG of your own.)*
 
 The image is laid down as faint glyphs *under* the rain; because compositing is
 additive, the bright heads brighten the masked cells as they fall through, so
