@@ -15,6 +15,11 @@
 // no hardcoded paths. The idle-launch *screensaver* glue (dist/) is Linux-only
 // for now; on macOS/Windows wlmatrix runs as a normal fullscreen app.
 
+// On Windows, build as a GUI-subsystem app so launching the screensaver (and the
+// /c, /p paths) never flashes a console window. CLI output still works when run
+// from a terminal — see attach_parent_console() in main().
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -1322,7 +1327,23 @@ enum Action {
     Gif(String),
 }
 
+/// Windows GUI-subsystem apps start with no console. If we were launched from a
+/// terminal, attach to its console so `--help`/`--shot`/errors still print; if
+/// launched by the screensaver host (no parent console) this fails harmlessly
+/// and — crucially — we never allocate one, so nothing flashes.
+#[cfg(windows)]
+fn attach_parent_console() {
+    use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    // SAFETY: a plain FFI call with no preconditions; return value ignored.
+    unsafe {
+        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
 fn main() {
+    #[cfg(windows)]
+    attach_parent_console();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // Windows screensaver (.scr) entry points: when installed as a screensaver,

@@ -21,7 +21,7 @@ dirs = "5"       # per-OS config directory
 
 # Windows-only: screensaver (.scr) /c configure dialog + /p preview sizing.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Console"] }
 
 [profile.release]
 opt-level = 3
